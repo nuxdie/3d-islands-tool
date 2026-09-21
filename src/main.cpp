@@ -27,9 +27,16 @@ struct SurfaceVertex {
     Vector3 normal;
 };
 
-struct IslandVolume {
+struct Metaball {
+    Vector3 center;
+    float radius;
+};
+
+struct IslandShape {
     Vector3 center;
     Vector3 radius;
+    std::vector<Metaball> lobes;
+    float surfaceThreshold;
 };
 
 struct GenerationSettings {
@@ -165,39 +172,37 @@ float cellularDistance3d(float x, float y, float z, std::uint32_t seed) {
     return std::sqrt(nearestSquared);
 }
 
-float ellipsoid(const Vector3& point, const Vector3& center, const Vector3& radius) {
-    const float x = (point.x - center.x) / radius.x;
-    const float y = (point.y - center.y) / radius.y;
-    const float z = (point.z - center.z) / radius.z;
-    return 1.0F - std::sqrt(x * x + y * y + z * z);
-}
-
-std::vector<IslandVolume> createIslandConfiguration(std::uint32_t seed,
-                                                     const GenerationSettings& settings) {
+std::vector<IslandShape> createIslandConfiguration(std::uint32_t seed,
+                                                   const GenerationSettings& settings) {
     std::mt19937 engine(seed);
     std::uniform_real_distribution<float> xzDistribution(-15.0F, 15.0F);
     std::uniform_real_distribution<float> yDistribution(-5.0F, 8.0F);
     std::uniform_real_distribution<float> horizontalRadius(3.8F, 8.5F);
     std::uniform_real_distribution<float> verticalRadius(2.7F, 6.2F);
+    std::uniform_int_distribution<int> lobeCountDistribution(4, 9);
+    std::uniform_real_distribution<float> offsetDistribution(-1.0F, 1.0F);
+    std::uniform_real_distribution<float> lobeRadiusDistribution(0.2F, 0.46F);
+    std::uniform_real_distribution<float> thresholdDistribution(0.9F, 1.18F);
     const int desiredCount = settings.islandCount;
 
-    std::vector<IslandVolume> islands;
+    std::vector<IslandShape> islands;
     islands.reserve(static_cast<std::size_t>(desiredCount));
     for (int islandIndex = 0; islandIndex < desiredCount; ++islandIndex) {
-        IslandVolume candidate{};
-        bool accepted = false;
+        IslandShape candidate{};
         for (int attempt = 0; attempt < 80; ++attempt) {
-            candidate = IslandVolume{
+            candidate = IslandShape{
                 Vector3{xzDistribution(engine), yDistribution(engine), xzDistribution(engine)},
                 Vector3{
                     horizontalRadius(engine) * settings.islandScale,
                     verticalRadius(engine) * settings.islandScale * settings.verticalScale,
                     horizontalRadius(engine) * settings.islandScale
-                }
+                },
+                {},
+                thresholdDistribution(engine)
             };
 
             bool hasSpace = true;
-            for (const IslandVolume& existing : islands) {
+            for (const IslandShape& existing : islands) {
                 const float dx = (candidate.center.x - existing.center.x) /
                                  (candidate.radius.x + existing.radius.x);
                 const float dy = (candidate.center.y - existing.center.y) /
@@ -211,24 +216,44 @@ std::vector<IslandVolume> createIslandConfiguration(std::uint32_t seed,
             }
 
             if (hasSpace) {
-                islands.push_back(candidate);
-                accepted = true;
                 break;
             }
         }
-        if (!accepted) {
-            islands.push_back(candidate);
+
+        const float averageRadius = (candidate.radius.x + candidate.radius.z) * 0.5F;
+        const int lobeCount = lobeCountDistribution(engine);
+        candidate.lobes.reserve(static_cast<std::size_t>(lobeCount));
+        candidate.lobes.push_back(Metaball{candidate.center, averageRadius * 0.43F});
+        for (int lobe = 1; lobe < lobeCount; ++lobe) {
+            candidate.lobes.push_back(Metaball{
+                Vector3{
+                    candidate.center.x + offsetDistribution(engine) * candidate.radius.x * 0.62F,
+                    candidate.center.y + offsetDistribution(engine) * candidate.radius.y * 0.58F,
+                    candidate.center.z + offsetDistribution(engine) * candidate.radius.z * 0.62F
+                },
+                averageRadius * lobeRadiusDistribution(engine)
+            });
         }
+        islands.push_back(candidate);
     }
     return islands;
 }
 
 float densityAt(const Vector3& point, std::uint32_t seed,
-                const std::vector<IslandVolume>& islands,
+                const std::vector<IslandShape>& islands,
                 const GenerationSettings& settings) {
     float island = -1000.0F;
-    for (const IslandVolume& volume : islands) {
-        island = std::max(island, ellipsoid(point, volume.center, volume.radius));
+    for (const IslandShape& shape : islands) {
+        float field = 0.0F;
+        for (const Metaball& lobe : shape.lobes) {
+            const float dx = point.x - lobe.center.x;
+            const float dy = point.y - lobe.center.y;
+            const float dz = point.z - lobe.center.z;
+            const float radiusSquared = lobe.radius * lobe.radius;
+            const float distanceSquared = dx * dx + dy * dy + dz * dz;
+            field += radiusSquared / (distanceSquared + radiusSquared * 0.08F);
+        }
+        island = std::max(island, field - shape.surfaceThreshold);
     }
 
     const float rock = fractalNoise3d(point.x * 0.105F + 8.0F,
@@ -342,7 +367,7 @@ Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
         (kVolumeMax.y - kVolumeMin.y) / static_cast<float>(kGridY - 1),
         (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1)
     };
-    const std::vector<IslandVolume> islands = createIslandConfiguration(seed, settings);
+    const std::vector<IslandShape> islands = createIslandConfiguration(seed, settings);
     islandCount = static_cast<int>(islands.size());
 
     std::vector<Sample> samples(static_cast<std::size_t>(kGridX * kGridY * kGridZ));
@@ -506,7 +531,7 @@ SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
 
     bool settingsChanged = false;
     float count = static_cast<float>(settings.islandCount);
-    if (drawSlider("ISLAND COUNT", "Number of floating base volumes", count,
+    if (drawSlider("ISLAND COUNT", "Number of independent organic clusters", count,
                    1.0F, 10.0F, 1.0F, controlX, 76.0F, "%.0f")) {
         const int nextCount = static_cast<int>(std::round(count));
         settingsChanged = nextCount != settings.islandCount;
