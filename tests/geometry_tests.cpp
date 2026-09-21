@@ -70,54 +70,28 @@ void indexFixture(HydrologyMap& map) {
     }
 }
 
-void checkWater() {
-    const int cell = (kGridZ / 2) * kGridX + kGridX / 2 - 1;
+void checkTerrainQueries() {
     HydrologyMap hillside;
-    // A bend in the slope between adjacent simulation nodes must be sampled.
+    // Runoff sources and the rain collision texture use the actual triangles.
     addPlane(hillside, -4.0F, 0.0F, 4.0F, 2.0F);
     addPlane(hillside, 0.0F, 4.0F, 2.0F, -3.0F);
     indexFixture(hillside);
-    const auto& river = waterPath(hillside, cell, cell + 1);
-    require(river.size() > 6, "River is still a single segment");
-    bool bent = false;
-    for (const Vector3 p : river) {
+    for (float x : {-2.0F,-0.2F,0.2F,2.0F}) {
         float height = 0.0F;
-        require(terrainHeight(hillside, p.x, p.z, kVolumeMax.y, height), "River left hillside");
-        require(std::abs(p.y - height - 0.045F) < 0.001F, "River does not conform to triangle surface");
-        const float t = (p.x - river.front().x) / (river.back().x - river.front().x);
-        bent |= std::abs(p.y - mix(river.front().y, river.back().y, t)) > 0.04F;
+        require(terrainHeight(hillside,x,0,kVolumeMax.y,height),"Height query missed hillside");
+        const float expected = x < 0 ? 2.0F-0.5F*x : 2.0F-1.25F*x;
+        require(std::abs(height-expected) < 0.001F,"Height query missed terrain bend");
     }
-    require(bent, "River cuts straight through terrain bend");
 
     HydrologyMap cliff;
     addPlane(cliff, -4.0F, 0.0F, 4.0F, 4.0F);
     addPlane(cliff, -4.0F, 4.0F, 0.0F, 0.0F);
     indexFixture(cliff);
-    // An outlet can fall onto terrain below rather than reaching the void.
-    const auto& fall = waterPath(cliff, cell, cell + 1);
-    require(fall.size() > 10, "Waterfall has no sampled trajectory");
-    require(fall.back().x > 0.5F, "Waterfall is still a vertical cylinder");
-    require(std::abs(fall.back().y - 0.045F) < 0.001F, "Waterfall did not stop on lower terrain");
-    for (const Vector3 p : fall) require(p.y >= 0.0F, "Waterfall penetrated receiving island");
-    const int receiver = surfaceCellAt(cliff, fall.back().x, fall.back().z);
-    require(receiver >= 0 && receiver != cell + 1, "Fixture must land beyond adjacent cell");
-    const WaterBake bake = bakeWater(cliff, false);
-    require(static_cast<int>(bake.routes[cell].y) == receiver, "GPU route misses waterfall landing");
-    bool foundIncoming = false;
-    const int first = static_cast<int>(bake.terrain[receiver].y);
-    const int count = static_cast<int>(bake.terrain[receiver].z);
-    for (int i = first; i < first + count; ++i) {
-        foundIncoming |= static_cast<int>(bake.incoming[i].x) == cell && bake.incoming[i].y == 1.0F;
-    }
-    require(foundIncoming, "GPU incoming-edge list does not contain waterfall source");
-
-    HydrologyMap edge;
-    addPlane(edge, -4.0F, 0.0F, 4.0F, 4.0F);
-    indexFixture(edge);
-    const auto& spill = waterPath(edge, cell, cell + 1);
-    require(spill.back().y < kVolumeMin.y, "Unobstructed waterfall did not exit volume");
-    require(spill[1].y == spill[0].y, "Waterfall skipped its terrain lip");
-    std::cout << "Rivers follow terrain bends; waterfalls follow lips and collide with lower islands\n";
+    float height = 0;
+    require(terrainHeight(cliff,-1,0,8,height) && std::abs(height-4) < 0.001F,"Missed upper island");
+    require(terrainHeight(cliff,-1,0,3,height) && std::abs(height) < 0.001F,"Missed lower island");
+    require(!terrainHit(cliff,Vector3{1,3,0},Vector3{1,2,0}).hit,"Ray hit beyond its segment");
+    std::cout << "Terrain queries follow triangle slopes and distinguish stacked surfaces\n";
 }
 
 int main() {
@@ -132,7 +106,7 @@ int main() {
         extreme.caveSize = 0.58F;
         extreme.caveStrength = 1.9F;
         checkClosed(123456, extreme);
-        checkWater();
+        checkTerrainQueries();
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
         return 1;

@@ -1,6 +1,7 @@
 #include "raylib.h"
 #include "rlgl.h"
 #include "water_shaders.h"
+#include "particle_fluid.h"
 
 #include <algorithm>
 #include <array>
@@ -11,7 +12,6 @@
 #include <random>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -66,7 +66,6 @@ struct HydrologyMap {
     std::vector<float> height;
     std::vector<SurfaceVertex> surface;
     std::vector<std::vector<int>> triangles;
-    std::unordered_map<int, std::vector<Vector3>> paths;
 };
 
 enum class SidebarAction {
@@ -446,7 +445,6 @@ std::vector<SurfaceVertex> extractIslands(std::uint32_t seed, const GenerationSe
 
     const std::size_t surfaceCellCount = static_cast<std::size_t>(kGridX * kGridZ);
     hydrology.height.assign(surfaceCellCount, kVolumeMin.y - 1.0F);
-    hydrology.paths.clear();
     for (int z = 0; z < kGridZ; ++z) {
         for (int x = 0; x < kGridX; ++x) {
             const std::size_t cell = static_cast<std::size_t>(z * kGridX + x);
@@ -689,20 +687,6 @@ float cloudHeight(const Cloud& cloud) {
     return cloud.position.y + std::sin(cloud.phase) * 0.22F;
 }
 
-int surfaceCellAt(const HydrologyMap& hydrology, float worldX, float worldZ) {
-    const float normalizedX = (worldX - kVolumeMin.x) / (kVolumeMax.x - kVolumeMin.x);
-    const float normalizedZ = (worldZ - kVolumeMin.z) / (kVolumeMax.z - kVolumeMin.z);
-    if (normalizedX < 0.0F || normalizedX > 1.0F || normalizedZ < 0.0F || normalizedZ > 1.0F) {
-        return -1;
-    }
-    const int x = std::clamp(static_cast<int>(std::round(normalizedX * static_cast<float>(kGridX - 1))),
-                             0, kGridX - 1);
-    const int z = std::clamp(static_cast<int>(std::round(normalizedZ * static_cast<float>(kGridZ - 1))),
-                             0, kGridZ - 1);
-    const int cell = z * kGridX + x;
-    return hydrology.height[static_cast<std::size_t>(cell)] > kVolumeMin.y ? cell : -1;
-}
-
 Vector3 surfaceCellPosition(const HydrologyMap& hydrology, int cell) {
     const int x = cell % kGridX;
     const int z = cell / kGridX;
@@ -749,55 +733,6 @@ bool terrainHeight(const HydrologyMap& hydrology, float x, float z, float ceilin
     return true;
 }
 
-// Cache finely sampled terrain paths, including ballistic motion after a lip.
-const std::vector<Vector3>& waterPath(HydrologyMap& hydrology, int cell, int destination) {
-    const int key = cell * (kGridX * kGridZ) + destination;
-    auto [entry, inserted] = hydrology.paths.try_emplace(key);
-    if (!inserted) return entry->second;
-    auto& path = entry->second;
-    Vector3 position = surfaceCellPosition(hydrology, cell);
-    const Vector3 target = surfaceCellPosition(hydrology, destination);
-    const Vector3 direction = normalize(Vector3{target.x - position.x, 0.0F, target.z - position.z});
-    const bool edge = hydrology.height[destination] <= kVolumeMin.y;
-    position.y += 0.045F;
-    path.push_back(position);
-    Vector3 velocity{direction.x * 1.8F, 0.0F, direction.z * 1.8F};
-    bool airborne = false;
-    constexpr float dt = 0.035F;
-    for (int step = 0; step < 400; ++step) {
-        Vector3 next{position.x + velocity.x * dt, position.y, position.z + velocity.z * dt};
-        if (!airborne) {
-            const float remaining = dot(subtract(target, position), direction);
-            if (!edge && remaining <= 0.065F && std::abs(position.y - target.y) < 0.38F) {
-                Vector3 end = target;
-                end.y += 0.045F;
-                path.push_back(end);
-                break;
-            }
-            float height = 0.0F;
-            if (terrainHeight(hydrology, next.x, next.z, position.y + 0.25F, height) &&
-                position.y - height < 0.38F) {
-                next.y = height + 0.045F;
-            } else {
-                airborne = true;
-            }
-        }
-        if (airborne) {
-            velocity.y -= 9.81F * dt;
-            next.y = position.y + velocity.y * dt;
-            const RayCollision hit = terrainHit(hydrology, position, next);
-            if (hit.hit) {
-                path.push_back(Vector3{hit.point.x, hit.point.y + 0.045F, hit.point.z});
-                break;
-            }
-        }
-        path.push_back(next);
-        position = next;
-        if (position.y < kVolumeMin.y) break;
-    }
-    return path;
-}
-
 #include "gpu_water.h"
 
 void drawClouds(const std::vector<Cloud>& clouds, const Model& sphere) {
@@ -827,7 +762,7 @@ void drawClouds(const std::vector<Cloud>& clouds, const Model& sphere) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     int benchmarkFrames = 0;
     float warmupSeconds = 0;
     bool hidden = false;
@@ -864,7 +799,7 @@ int main(int argc, char** argv) {
     HydrologyMap hydrology;
     Model islands = createIslands(seed, settings, triangleCount, islandCount, hydrology);
     std::vector<Cloud> clouds = createClouds(seed, settings);
-    GpuWater gpu = createGpuWater(hydrology, static_cast<int>(clouds.size()));
+    GpuWater gpu = createGpuWater(hydrology, clouds);
     islands.materials[0].shader = gpu.terrainShader;
     for (int step = 0; step < static_cast<int>(warmupSeconds / kWaterStep); ++step) {
         stepGpuWater(gpu, clouds);
@@ -888,10 +823,10 @@ int main(int argc, char** argv) {
 
     int renderedFrames = 0;
     double benchmarkStart = 0;
-    // Offscreen rendering is required for meaningful hidden-window benchmarks:
-    // drivers may skip all rasterization to an unmapped default framebuffer.
-    RenderTexture2D benchmarkTarget{};
-    if (benchmarkFrames > 0) benchmarkTarget = LoadRenderTexture(1280, 760);
+    // A single-sample scene target lets fluid refraction sample opaque color
+    // and depth. It also keeps hidden-window benchmarks from being skipped by
+    // drivers that do not rasterize to an unmapped default framebuffer.
+    RenderTexture2D benchmarkTarget = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
     while (!WindowShouldClose()) {
         const float deltaTime = benchmarkFrames > 0 ? kWaterStep : GetFrameTime();
         if (IsKeyPressed(KEY_SPACE)) {
@@ -926,9 +861,13 @@ int main(int argc, char** argv) {
         };
         for (Cloud& cloud : clouds) cloud.phase += deltaTime * 0.55F;
         updateGpuWater(gpu, clouds, deltaTime);
+        if (benchmarkTarget.texture.width != GetScreenWidth() || benchmarkTarget.texture.height != GetScreenHeight()) {
+            UnloadRenderTexture(benchmarkTarget);
+            benchmarkTarget = LoadRenderTexture(GetScreenWidth(),GetScreenHeight());
+        }
 
         BeginDrawing();
-        if (benchmarkFrames > 0) BeginTextureMode(benchmarkTarget);
+        BeginTextureMode(benchmarkTarget);
         ClearBackground(Color{5, 10, 19, 255});
         DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(),
                                Color{18, 33, 48, 255}, Color{3, 7, 15, 255});
@@ -957,7 +896,8 @@ int main(int argc, char** argv) {
             DrawText("GPU BENCHMARK", GetScreenWidth() - static_cast<int>(kSidebarWidth) - 145,
                      GetScreenHeight() - 34, 16, Color{116, 202, 183, 255});
         } else DrawFPS(GetScreenWidth() - static_cast<int>(kSidebarWidth) - 92, GetScreenHeight() - 34);
-        if (benchmarkFrames > 0) EndTextureMode();
+        EndTextureMode();
+        DrawTextureRec(benchmarkTarget.texture, Rectangle{0,0,static_cast<float>(GetScreenWidth()),-static_cast<float>(GetScreenHeight())}, Vector2{}, WHITE);
         EndDrawing();
         ++renderedFrames;
         // Exclude initialization/shader warm-up from the measured interval.
@@ -984,7 +924,7 @@ int main(int argc, char** argv) {
             unloadGpuWater(gpu);
             islands = createIslands(seed, settings, triangleCount, islandCount, hydrology);
             clouds = createClouds(seed, settings);
-            gpu = createGpuWater(hydrology, static_cast<int>(clouds.size()));
+            gpu = createGpuWater(hydrology, clouds);
             islands.materials[0].shader = gpu.terrainShader;
             TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
                      islandCount, triangleCount, seed);
@@ -997,4 +937,8 @@ int main(int argc, char** argv) {
     if (benchmarkTarget.id != 0) UnloadRenderTexture(benchmarkTarget);
     CloseWindow();
     return 0;
+} catch (const std::exception& error) {
+    TraceLog(LOG_ERROR,"%s",error.what());
+    if (IsWindowReady()) CloseWindow();
+    return 1;
 }
