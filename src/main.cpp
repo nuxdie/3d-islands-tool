@@ -14,6 +14,7 @@ constexpr int kGridY = 40;
 constexpr int kGridZ = 56;
 constexpr Vector3 kVolumeMin{-27.0F, -14.0F, -27.0F};
 constexpr Vector3 kVolumeMax{27.0F, 17.0F, 27.0F};
+constexpr float kSidebarWidth = 300.0F;
 
 struct Sample {
     Vector3 position;
@@ -29,6 +30,21 @@ struct SurfaceVertex {
 struct IslandVolume {
     Vector3 center;
     Vector3 radius;
+};
+
+struct GenerationSettings {
+    int islandCount = 6;
+    float islandScale = 1.0F;
+    float verticalScale = 1.0F;
+    float roughness = 0.72F;
+    float caveSize = 0.34F;
+    float caveStrength = 1.36F;
+};
+
+enum class SidebarAction {
+    none,
+    rebuild,
+    newSeed
 };
 
 float smoothstep(float value) {
@@ -156,22 +172,28 @@ float ellipsoid(const Vector3& point, const Vector3& center, const Vector3& radi
     return 1.0F - std::sqrt(x * x + y * y + z * z);
 }
 
-std::vector<IslandVolume> createIslandConfiguration(std::uint32_t seed) {
+std::vector<IslandVolume> createIslandConfiguration(std::uint32_t seed,
+                                                     const GenerationSettings& settings) {
     std::mt19937 engine(seed);
-    std::uniform_int_distribution<int> countDistribution(3, 8);
-    std::uniform_real_distribution<float> xzDistribution(-18.0F, 18.0F);
-    std::uniform_real_distribution<float> yDistribution(-5.5F, 9.0F);
+    std::uniform_real_distribution<float> xzDistribution(-15.0F, 15.0F);
+    std::uniform_real_distribution<float> yDistribution(-5.0F, 8.0F);
     std::uniform_real_distribution<float> horizontalRadius(3.8F, 8.5F);
     std::uniform_real_distribution<float> verticalRadius(2.7F, 6.2F);
-    const int desiredCount = countDistribution(engine);
+    const int desiredCount = settings.islandCount;
 
     std::vector<IslandVolume> islands;
     islands.reserve(static_cast<std::size_t>(desiredCount));
     for (int islandIndex = 0; islandIndex < desiredCount; ++islandIndex) {
+        IslandVolume candidate{};
+        bool accepted = false;
         for (int attempt = 0; attempt < 80; ++attempt) {
-            const IslandVolume candidate{
+            candidate = IslandVolume{
                 Vector3{xzDistribution(engine), yDistribution(engine), xzDistribution(engine)},
-                Vector3{horizontalRadius(engine), verticalRadius(engine), horizontalRadius(engine)}
+                Vector3{
+                    horizontalRadius(engine) * settings.islandScale,
+                    verticalRadius(engine) * settings.islandScale * settings.verticalScale,
+                    horizontalRadius(engine) * settings.islandScale
+                }
             };
 
             bool hasSpace = true;
@@ -190,15 +212,20 @@ std::vector<IslandVolume> createIslandConfiguration(std::uint32_t seed) {
 
             if (hasSpace) {
                 islands.push_back(candidate);
+                accepted = true;
                 break;
             }
+        }
+        if (!accepted) {
+            islands.push_back(candidate);
         }
     }
     return islands;
 }
 
 float densityAt(const Vector3& point, std::uint32_t seed,
-                const std::vector<IslandVolume>& islands) {
+                const std::vector<IslandVolume>& islands,
+                const GenerationSettings& settings) {
     float island = -1000.0F;
     for (const IslandVolume& volume : islands) {
         island = std::max(island, ellipsoid(point, volume.center, volume.radius));
@@ -213,9 +240,10 @@ float densityAt(const Vector3& point, std::uint32_t seed,
                                                    point.z * caveScale - 4.0F, seed + 7919U);
     const float caveRoughness = fractalNoise3d(point.x * 0.24F, point.y * 0.24F,
                                                point.z * 0.24F, seed + 104729U, 3) - 0.5F;
-    const float caveRadius = 0.34F + caveRoughness * 0.16F;
-    const float caveCut = (1.0F - smoothstep(caveRadius, caveRadius + 0.13F, caveDistance)) * 1.36F;
-    return island + rock * 0.72F - caveCut;
+    const float caveRadius = settings.caveSize + caveRoughness * 0.16F;
+    const float caveCut = (1.0F - smoothstep(caveRadius, caveRadius + 0.13F, caveDistance)) *
+                          settings.caveStrength;
+    return island + rock * settings.roughness - caveCut;
 }
 
 Color surfaceColor(const SurfaceVertex& vertex) {
@@ -304,7 +332,8 @@ void polygonizeTetrahedron(const std::array<const Sample*, 4>& tetra,
     addTriangle(vertices, ac, bd, bc);
 }
 
-Model createIslands(std::uint32_t seed, int& triangleCount, int& islandCount) {
+Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
+                    int& triangleCount, int& islandCount) {
     const auto sampleIndex = [](int x, int y, int z) {
         return static_cast<std::size_t>((z * kGridY + y) * kGridX + x);
     };
@@ -313,7 +342,7 @@ Model createIslands(std::uint32_t seed, int& triangleCount, int& islandCount) {
         (kVolumeMax.y - kVolumeMin.y) / static_cast<float>(kGridY - 1),
         (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1)
     };
-    const std::vector<IslandVolume> islands = createIslandConfiguration(seed);
+    const std::vector<IslandVolume> islands = createIslandConfiguration(seed, settings);
     islandCount = static_cast<int>(islands.size());
 
     std::vector<Sample> samples(static_cast<std::size_t>(kGridX * kGridY * kGridZ));
@@ -326,7 +355,7 @@ Model createIslands(std::uint32_t seed, int& triangleCount, int& islandCount) {
                     kVolumeMin.y + static_cast<float>(y) * step.y,
                     kVolumeMin.z + static_cast<float>(z) * step.z
                 };
-                sample.density = densityAt(sample.position, seed, islands);
+                sample.density = densityAt(sample.position, seed, islands, settings);
             }
         }
     }
@@ -404,21 +433,105 @@ Model createIslands(std::uint32_t seed, int& triangleCount, int& islandCount) {
     return LoadModelFromMesh(mesh);
 }
 
-void drawInterface(std::uint32_t seed, int islandCount, int triangleCount,
-                   bool wireframe, bool autoRotate) {
+void drawInterface(std::uint32_t seed, int islandCount, int triangleCount) {
     DrawRectangleRounded(Rectangle{20.0F, 20.0F, 338.0F, 118.0F}, 0.12F, 8,
                          Fade(Color{8, 14, 24, 255}, 0.84F));
     DrawText("VOLUMETRIC NOISE ISLANDS", 36, 34, 20, Color{231, 222, 191, 255});
     DrawText(TextFormat("SEED  %u", seed), 36, 62, 16, Color{127, 195, 183, 255});
     DrawText(TextFormat("%d ISLANDS  |  %d TRIANGLES  |  3D CAVES", islandCount, triangleCount),
              36, 85, 12, Color{153, 170, 174, 255});
-    DrawText("DRAG orbit   W wheel zoom   SPACE regenerate", 36, 108, 12, Color{190, 204, 201, 255});
+    DrawText("DRAG orbit   WHEEL zoom   SPACE new seed", 36, 108, 12, Color{190, 204, 201, 255});
+}
+
+bool drawSlider(const char* label, float& value, float minimum, float maximum,
+                float x, float y, const char* valueFormat) {
+    const float width = kSidebarWidth - 48.0F;
+    const Rectangle hitArea{x, y + 20.0F, width, 24.0F};
+    const Vector2 mouse = GetMousePosition();
+    bool changed = false;
+    if (CheckCollisionPointRec(mouse, hitArea) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        const float nextValue = minimum +
+            std::clamp((mouse.x - x) / width, 0.0F, 1.0F) * (maximum - minimum);
+        changed = std::abs(nextValue - value) > 0.0001F;
+        value = nextValue;
+    }
+
+    DrawText(label, static_cast<int>(x), static_cast<int>(y), 13, Color{181, 198, 201, 255});
+    const char* valueText = TextFormat(valueFormat, value);
+    DrawText(valueText, static_cast<int>(x + width - static_cast<float>(MeasureText(valueText, 13))),
+             static_cast<int>(y), 13, Color{116, 202, 183, 255});
+    DrawRectangleRounded(Rectangle{x, y + 28.0F, width, 4.0F}, 1.0F, 4, Color{47, 68, 76, 255});
+    const float amount = (value - minimum) / (maximum - minimum);
+    DrawRectangleRounded(Rectangle{x, y + 28.0F, width * amount, 4.0F}, 1.0F, 4,
+                         Color{72, 166, 149, 255});
+    DrawCircleV(Vector2{x + width * amount, y + 30.0F}, 6.0F,
+                CheckCollisionPointRec(mouse, hitArea) ? Color{229, 220, 184, 255}
+                                                       : Color{154, 210, 194, 255});
+    return changed;
+}
+
+bool drawButton(const Rectangle& bounds, const char* label, bool emphasized = false) {
+    const bool hovered = CheckCollisionPointRec(GetMousePosition(), bounds);
+    const Color base = emphasized ? Color{53, 135, 121, 255} : Color{31, 52, 62, 255};
+    const Color hover = emphasized ? Color{69, 158, 140, 255} : Color{43, 68, 79, 255};
+    DrawRectangleRounded(bounds, 0.16F, 6, hovered ? hover : base);
+    DrawRectangleRoundedLinesEx(bounds, 0.16F, 6, 1.0F, Color{91, 130, 133, 255});
+    DrawText(label,
+             static_cast<int>(bounds.x + (bounds.width - static_cast<float>(MeasureText(label, 13))) * 0.5F),
+             static_cast<int>(bounds.y + 11.0F), 13, Color{223, 226, 211, 255});
+    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
+                          bool& settingsDirty, bool wireframe, bool autoRotate) {
+    const float panelX = static_cast<float>(GetScreenWidth()) - kSidebarWidth;
+    const float controlX = panelX + 24.0F;
+    DrawRectangle(static_cast<int>(panelX), 0, static_cast<int>(kSidebarWidth), GetScreenHeight(),
+                  Color{9, 18, 27, 247});
+    DrawRectangle(static_cast<int>(panelX), 0, 1, GetScreenHeight(), Color{65, 99, 106, 255});
+    DrawText("GENERATOR", static_cast<int>(controlX), 22, 22, Color{231, 222, 191, 255});
+    DrawText(TextFormat("SEED %u", seed), static_cast<int>(controlX), 49, 12,
+             Color{102, 158, 155, 255});
+
+    float count = static_cast<float>(settings.islandCount);
+    if (drawSlider("ISLAND COUNT", count, 1.0F, 10.0F, controlX, 76.0F, "%.0f")) {
+        settings.islandCount = static_cast<int>(std::round(count));
+        settingsDirty = true;
+    }
+    settingsDirty |= drawSlider("ISLAND SCALE", settings.islandScale, 0.55F, 1.35F,
+                                controlX, 124.0F, "%.2f");
+    settingsDirty |= drawSlider("VERTICAL SCALE", settings.verticalScale, 0.55F, 1.45F,
+                                controlX, 172.0F, "%.2f");
+    settingsDirty |= drawSlider("SURFACE ROUGHNESS", settings.roughness, 0.0F, 1.25F,
+                                controlX, 220.0F, "%.2f");
+    settingsDirty |= drawSlider("CAVE SIZE", settings.caveSize, 0.12F, 0.58F,
+                                controlX, 268.0F, "%.2f");
+    settingsDirty |= drawSlider("CAVE STRENGTH", settings.caveStrength, 0.25F, 1.9F,
+                                controlX, 316.0F, "%.2f");
+
+    if (settingsDirty) {
+        DrawText("PARAMETERS CHANGED", static_cast<int>(controlX), 359, 11, Color{225, 171, 100, 255});
+    } else {
+        DrawText("MESH UP TO DATE", static_cast<int>(controlX), 359, 11, Color{91, 151, 139, 255});
+    }
+
+    SidebarAction action = SidebarAction::none;
+    if (drawButton(Rectangle{controlX, 380.0F, kSidebarWidth - 48.0F, 36.0F},
+                   "APPLY PARAMETERS", true)) {
+        action = SidebarAction::rebuild;
+    }
+    if (drawButton(Rectangle{controlX, 426.0F, kSidebarWidth - 48.0F, 36.0F},
+                   "NEW RANDOM SEED")) {
+        action = SidebarAction::newSeed;
+    }
 
     const char* mode = wireframe ? "WIREFRAME" : "SOLID";
     const char* motion = autoRotate ? "AUTO" : "MANUAL";
-    const char* status = TextFormat("[%s]  %s  |  R auto-rotate", mode, motion);
-    const int right = GetScreenWidth() - 20;
-    DrawText(status, right - MeasureText(status, 14), 28, 14, Color{205, 218, 214, 255});
+    DrawText(TextFormat("W  %s", mode), static_cast<int>(controlX), 478, 12,
+             Color{160, 179, 181, 255});
+    DrawText(TextFormat("R  ROTATION %s", motion), static_cast<int>(controlX + 105.0F), 478, 12,
+             Color{160, 179, 181, 255});
+    return action;
 }
 
 void drawStars() {
@@ -444,9 +557,10 @@ int main() {
     std::mt19937 randomEngine(std::random_device{}());
     std::uniform_int_distribution<std::uint32_t> seedDistribution;
     std::uint32_t seed = seedDistribution(randomEngine);
+    GenerationSettings settings;
     int triangleCount = 0;
     int islandCount = 0;
-    Model islands = createIslands(seed, triangleCount, islandCount);
+    Model islands = createIslands(seed, settings, triangleCount, islandCount);
     TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
              islandCount, triangleCount, seed);
 
@@ -455,6 +569,8 @@ int main() {
     float distance = 52.0F;
     bool wireframe = false;
     bool autoRotate = true;
+    bool settingsDirty = false;
+    bool rebuildRequested = false;
 
     Camera3D camera{};
     camera.target = Vector3{0.0F, 1.5F, 0.0F};
@@ -465,10 +581,7 @@ int main() {
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
             seed = seedDistribution(randomEngine);
-            UnloadModel(islands);
-            islands = createIslands(seed, triangleCount, islandCount);
-            TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
-                     islandCount, triangleCount, seed);
+            rebuildRequested = true;
         }
         if (IsKeyPressed(KEY_W)) {
             wireframe = !wireframe;
@@ -477,7 +590,9 @@ int main() {
             autoRotate = !autoRotate;
         }
 
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        const bool mouseOverSidebar = GetMousePosition().x >=
+                                      static_cast<float>(GetScreenWidth()) - kSidebarWidth;
+        if (!mouseOverSidebar && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             const Vector2 delta = GetMouseDelta();
             yaw -= delta.x * 0.006F;
             pitch = std::clamp(pitch + delta.y * 0.006F, -1.25F, 1.25F);
@@ -485,7 +600,9 @@ int main() {
         } else if (autoRotate) {
             yaw += GetFrameTime() * 0.08F;
         }
-        distance = std::clamp(distance - GetMouseWheelMove() * 2.5F, 24.0F, 82.0F);
+        if (!mouseOverSidebar) {
+            distance = std::clamp(distance - GetMouseWheelMove() * 2.5F, 24.0F, 82.0F);
+        }
 
         camera.position = Vector3{
             std::cos(yaw) * std::cos(pitch) * distance,
@@ -507,9 +624,26 @@ int main() {
         }
         EndMode3D();
 
-        drawInterface(seed, islandCount, triangleCount, wireframe, autoRotate);
-        DrawFPS(GetScreenWidth() - 92, GetScreenHeight() - 34);
+        drawInterface(seed, islandCount, triangleCount);
+        const SidebarAction sidebarAction = drawSidebar(settings, seed, settingsDirty,
+                                                        wireframe, autoRotate);
+        if (sidebarAction == SidebarAction::rebuild) {
+            rebuildRequested = true;
+        } else if (sidebarAction == SidebarAction::newSeed) {
+            seed = seedDistribution(randomEngine);
+            rebuildRequested = true;
+        }
+        DrawFPS(GetScreenWidth() - static_cast<int>(kSidebarWidth) - 92, GetScreenHeight() - 34);
         EndDrawing();
+
+        if (rebuildRequested) {
+            UnloadModel(islands);
+            islands = createIslands(seed, settings, triangleCount, islandCount);
+            TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
+                     islandCount, triangleCount, seed);
+            settingsDirty = false;
+            rebuildRequested = false;
+        }
     }
 
     UnloadModel(islands);

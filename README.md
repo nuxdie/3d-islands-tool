@@ -22,3 +22,5 @@ cmake --build build -j
 | `W` | Toggle solid/wireframe mode |
 | `R` | Toggle automatic rotation |
 | `Esc` | Quit |
+
+The sidebar controls island count, overall and vertical scale, surface roughness, cave size, and cave strength. Use **Apply Parameters** to rebuild the current seed or **New Random Seed** to create a different configuration with the selected parameters.
