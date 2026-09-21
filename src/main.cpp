@@ -268,7 +268,7 @@ std::vector<Cloud> createClouds(std::uint32_t seed, const GenerationSettings& se
         clouds.push_back(Cloud{
             Vector3{
                 island.center.x + offset(engine),
-                std::clamp(island.center.y + island.radius.y + 4.5F, 12.0F, 20.0F),
+                std::clamp(island.center.y + island.radius.y + 12.0F, 20.0F, 30.0F),
                 island.center.z + offset(engine)
             },
             std::clamp(horizontalSize * sizeVariation(engine), 2.2F, 4.8F),
