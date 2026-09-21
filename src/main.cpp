@@ -26,6 +26,11 @@ struct SurfaceVertex {
     Vector3 normal;
 };
 
+struct IslandVolume {
+    Vector3 center;
+    Vector3 radius;
+};
+
 float smoothstep(float value) {
     return value * value * (3.0F - 2.0F * value);
 }
@@ -151,11 +156,53 @@ float ellipsoid(const Vector3& point, const Vector3& center, const Vector3& radi
     return 1.0F - std::sqrt(x * x + y * y + z * z);
 }
 
-float densityAt(const Vector3& point, std::uint32_t seed) {
-    float island = ellipsoid(point, Vector3{-1.5F, 1.8F, 0.0F}, Vector3{13.5F, 7.8F, 12.0F});
-    island = std::max(island, ellipsoid(point, Vector3{-16.0F, 6.2F, -8.0F}, Vector3{5.5F, 4.0F, 5.2F}));
-    island = std::max(island, ellipsoid(point, Vector3{14.5F, -0.5F, 8.5F}, Vector3{6.2F, 4.5F, 5.7F}));
-    island = std::max(island, ellipsoid(point, Vector3{10.0F, 8.0F, -14.0F}, Vector3{4.2F, 3.0F, 4.0F}));
+std::vector<IslandVolume> createIslandConfiguration(std::uint32_t seed) {
+    std::mt19937 engine(seed);
+    std::uniform_int_distribution<int> countDistribution(3, 8);
+    std::uniform_real_distribution<float> xzDistribution(-18.0F, 18.0F);
+    std::uniform_real_distribution<float> yDistribution(-5.5F, 9.0F);
+    std::uniform_real_distribution<float> horizontalRadius(3.8F, 8.5F);
+    std::uniform_real_distribution<float> verticalRadius(2.7F, 6.2F);
+    const int desiredCount = countDistribution(engine);
+
+    std::vector<IslandVolume> islands;
+    islands.reserve(static_cast<std::size_t>(desiredCount));
+    for (int islandIndex = 0; islandIndex < desiredCount; ++islandIndex) {
+        for (int attempt = 0; attempt < 80; ++attempt) {
+            const IslandVolume candidate{
+                Vector3{xzDistribution(engine), yDistribution(engine), xzDistribution(engine)},
+                Vector3{horizontalRadius(engine), verticalRadius(engine), horizontalRadius(engine)}
+            };
+
+            bool hasSpace = true;
+            for (const IslandVolume& existing : islands) {
+                const float dx = (candidate.center.x - existing.center.x) /
+                                 (candidate.radius.x + existing.radius.x);
+                const float dy = (candidate.center.y - existing.center.y) /
+                                 (candidate.radius.y + existing.radius.y);
+                const float dz = (candidate.center.z - existing.center.z) /
+                                 (candidate.radius.z + existing.radius.z);
+                if (std::sqrt(dx * dx + dy * dy + dz * dz) < 0.68F) {
+                    hasSpace = false;
+                    break;
+                }
+            }
+
+            if (hasSpace) {
+                islands.push_back(candidate);
+                break;
+            }
+        }
+    }
+    return islands;
+}
+
+float densityAt(const Vector3& point, std::uint32_t seed,
+                const std::vector<IslandVolume>& islands) {
+    float island = -1000.0F;
+    for (const IslandVolume& volume : islands) {
+        island = std::max(island, ellipsoid(point, volume.center, volume.radius));
+    }
 
     const float rock = fractalNoise3d(point.x * 0.105F + 8.0F,
                                       point.y * 0.12F - 3.0F,
@@ -257,7 +304,7 @@ void polygonizeTetrahedron(const std::array<const Sample*, 4>& tetra,
     addTriangle(vertices, ac, bd, bc);
 }
 
-Model createIslands(std::uint32_t seed, int& triangleCount) {
+Model createIslands(std::uint32_t seed, int& triangleCount, int& islandCount) {
     const auto sampleIndex = [](int x, int y, int z) {
         return static_cast<std::size_t>((z * kGridY + y) * kGridX + x);
     };
@@ -266,6 +313,8 @@ Model createIslands(std::uint32_t seed, int& triangleCount) {
         (kVolumeMax.y - kVolumeMin.y) / static_cast<float>(kGridY - 1),
         (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1)
     };
+    const std::vector<IslandVolume> islands = createIslandConfiguration(seed);
+    islandCount = static_cast<int>(islands.size());
 
     std::vector<Sample> samples(static_cast<std::size_t>(kGridX * kGridY * kGridZ));
     for (int z = 0; z < kGridZ; ++z) {
@@ -277,7 +326,7 @@ Model createIslands(std::uint32_t seed, int& triangleCount) {
                     kVolumeMin.y + static_cast<float>(y) * step.y,
                     kVolumeMin.z + static_cast<float>(z) * step.z
                 };
-                sample.density = densityAt(sample.position, seed);
+                sample.density = densityAt(sample.position, seed, islands);
             }
         }
     }
@@ -355,12 +404,13 @@ Model createIslands(std::uint32_t seed, int& triangleCount) {
     return LoadModelFromMesh(mesh);
 }
 
-void drawInterface(std::uint32_t seed, int triangleCount, bool wireframe, bool autoRotate) {
+void drawInterface(std::uint32_t seed, int islandCount, int triangleCount,
+                   bool wireframe, bool autoRotate) {
     DrawRectangleRounded(Rectangle{20.0F, 20.0F, 338.0F, 118.0F}, 0.12F, 8,
                          Fade(Color{8, 14, 24, 255}, 0.84F));
     DrawText("VOLUMETRIC NOISE ISLANDS", 36, 34, 20, Color{231, 222, 191, 255});
     DrawText(TextFormat("SEED  %u", seed), 36, 62, 16, Color{127, 195, 183, 255});
-    DrawText(TextFormat("%d TRIANGLES  |  3D DENSITY + CAVES", triangleCount),
+    DrawText(TextFormat("%d ISLANDS  |  %d TRIANGLES  |  3D CAVES", islandCount, triangleCount),
              36, 85, 12, Color{153, 170, 174, 255});
     DrawText("DRAG orbit   W wheel zoom   SPACE regenerate", 36, 108, 12, Color{190, 204, 201, 255});
 
@@ -395,8 +445,10 @@ int main() {
     std::uniform_int_distribution<std::uint32_t> seedDistribution;
     std::uint32_t seed = seedDistribution(randomEngine);
     int triangleCount = 0;
-    Model islands = createIslands(seed, triangleCount);
-    TraceLog(LOG_INFO, "VOLUME: Generated %d triangles from seed %u", triangleCount, seed);
+    int islandCount = 0;
+    Model islands = createIslands(seed, triangleCount, islandCount);
+    TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
+             islandCount, triangleCount, seed);
 
     float yaw = 0.72F;
     float pitch = 0.32F;
@@ -414,8 +466,9 @@ int main() {
         if (IsKeyPressed(KEY_SPACE)) {
             seed = seedDistribution(randomEngine);
             UnloadModel(islands);
-            islands = createIslands(seed, triangleCount);
-            TraceLog(LOG_INFO, "VOLUME: Generated %d triangles from seed %u", triangleCount, seed);
+            islands = createIslands(seed, triangleCount, islandCount);
+            TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
+                     islandCount, triangleCount, seed);
         }
         if (IsKeyPressed(KEY_W)) {
             wireframe = !wireframe;
@@ -454,7 +507,7 @@ int main() {
         }
         EndMode3D();
 
-        drawInterface(seed, triangleCount, wireframe, autoRotate);
+        drawInterface(seed, islandCount, triangleCount, wireframe, autoRotate);
         DrawFPS(GetScreenWidth() - 92, GetScreenHeight() - 34);
         EndDrawing();
     }

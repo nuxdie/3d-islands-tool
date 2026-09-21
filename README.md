@@ -1,6 +1,6 @@
 # Volumetric Noise Islands
 
-An interactive C++ visualization that turns a seeded 3D density field into floating, cave-filled islands. Unlike a heightmap, the volume supports overhangs, undersides, tunnels, and enclosed voids. A marching-tetrahedra pass extracts the visible isosurface from fractal rock and cave noise.
+An interactive C++ visualization that turns a seeded 3D density field into floating, cave-filled islands. Each seed controls the island count, placement, elevation, proportions, rock surface, and cave field. Unlike a heightmap, the volume supports overhangs, undersides, tunnels, and enclosed voids. A marching-tetrahedra pass extracts the visible isosurface from fractal rock and cave noise.
 
 ## Build
 
