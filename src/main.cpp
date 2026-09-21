@@ -15,6 +15,7 @@ constexpr int kGridZ = 56;
 constexpr Vector3 kVolumeMin{-27.0F, -14.0F, -27.0F};
 constexpr Vector3 kVolumeMax{27.0F, 17.0F, 27.0F};
 constexpr float kSidebarWidth = 400.0F;
+constexpr float kWaterLevelScale = 0.65F;
 
 struct Sample {
     Vector3 position;
@@ -724,7 +725,7 @@ void updateWeather(std::vector<Cloud>& clouds, std::vector<RainDrop>& drops,
             const float surface = hydrology.height[static_cast<std::size_t>(cell)];
             if (previousY >= surface && drop.position.y <= surface + 0.12F) {
                 hydrology.water[static_cast<std::size_t>(cell)] =
-                    std::min(2.0F, hydrology.water[static_cast<std::size_t>(cell)] + 0.045F);
+                    std::min(4.0F, hydrology.water[static_cast<std::size_t>(cell)] + 0.045F);
                 hydrology.wetness[static_cast<std::size_t>(cell)] =
                     std::min(1.0F, hydrology.wetness[static_cast<std::size_t>(cell)] + 0.08F);
                 drop.position.y = kVolumeMin.y - 2.0F;
@@ -761,7 +762,9 @@ void updateHydrology(HydrologyMap& hydrology, float deltaTime) {
             hydrology.water[index] *= std::exp(-deltaTime * 0.006F);
 
             int lowestNeighbor = -1;
-            float lowestHeight = hydrology.height[index] - 0.035F;
+            const float currentWaterLevel = hydrology.height[index] +
+                                            hydrology.water[index] * kWaterLevelScale;
+            float lowestWaterLevel = currentWaterLevel - 0.025F;
             bool bordersAir = false;
             for (const auto& offset : kNeighbors) {
                 const int neighborX = x + offset[0];
@@ -771,12 +774,17 @@ void updateHydrology(HydrologyMap& hydrology, float deltaTime) {
                     continue;
                 }
                 const int neighbor = neighborZ * kGridX + neighborX;
-                const float neighborHeight = hydrology.height[static_cast<std::size_t>(neighbor)];
+                const std::size_t neighborIndex = static_cast<std::size_t>(neighbor);
+                const float neighborHeight = hydrology.height[neighborIndex];
                 if (neighborHeight <= kVolumeMin.y) {
                     bordersAir = true;
-                } else if (neighborHeight < lowestHeight) {
-                    lowestHeight = neighborHeight;
-                    lowestNeighbor = neighbor;
+                } else {
+                    const float neighborWaterLevel = neighborHeight +
+                                                     hydrology.water[neighborIndex] * kWaterLevelScale;
+                    if (neighborWaterLevel < lowestWaterLevel) {
+                        lowestWaterLevel = neighborWaterLevel;
+                        lowestNeighbor = neighbor;
+                    }
                 }
             }
 
@@ -796,7 +804,7 @@ void updateHydrology(HydrologyMap& hydrology, float deltaTime) {
     }
 
     for (std::size_t index = 0; index < hydrology.water.size(); ++index) {
-        hydrology.water[index] = std::min(2.0F, hydrology.water[index] + incoming[index]);
+        hydrology.water[index] = std::min(4.0F, hydrology.water[index] + incoming[index]);
     }
 }
 
@@ -828,6 +836,23 @@ void applyWetness(Model& model, const HydrologyMap& hydrology,
 }
 
 void drawHydrology(const HydrologyMap& hydrology) {
+    const float cellWidth = (kVolumeMax.x - kVolumeMin.x) / static_cast<float>(kGridX - 1);
+    const float cellDepth = (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1);
+    const float poolRadius = std::min(cellWidth, cellDepth) * 0.62F;
+    for (std::size_t index = 0; index < hydrology.water.size(); ++index) {
+        const float storedWater = hydrology.water[index];
+        const bool standingWater = hydrology.downstream[index] == -1 && storedWater > 0.045F;
+        const bool deepPool = storedWater > 0.14F;
+        if (hydrology.height[index] > kVolumeMin.y && (standingWater || deepPool)) {
+            Vector3 center = surfaceCellPosition(hydrology, static_cast<int>(index));
+            center.y += std::min(1.4F, storedWater * kWaterLevelScale) + 0.025F;
+            const unsigned char alpha = static_cast<unsigned char>(std::clamp(
+                105.0F + storedWater * 120.0F, 105.0F, 205.0F));
+            DrawCylinder(center, poolRadius, poolRadius, 0.05F, 10,
+                         Color{42, 124, 166, alpha});
+        }
+    }
+
     for (std::size_t index = 0; index < hydrology.flow.size(); ++index) {
         if (hydrology.downstream[index] >= 0 && hydrology.flow[index] > 0.008F) {
             Vector3 start = surfaceCellPosition(hydrology, static_cast<int>(index));
