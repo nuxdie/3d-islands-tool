@@ -1,10 +1,16 @@
 #include "raylib.h"
+#include "rlgl.h"
+#include "water_shaders.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <cstdlib>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -16,7 +22,6 @@ constexpr int kGridZ = 88;
 constexpr Vector3 kVolumeMin{-27.0F, -14.0F, -27.0F};
 constexpr Vector3 kVolumeMax{27.0F, 17.0F, 27.0F};
 constexpr float kSidebarWidth = 400.0F;
-constexpr float kWaterLevelScale = 0.65F;
 
 struct Sample {
     Vector3 position;
@@ -54,24 +59,11 @@ struct Cloud {
     Vector3 position;
     float size;
     float phase;
-    float rainAccumulator;
     std::uint32_t shapeSeed;
-};
-
-struct RainDrop {
-    Vector3 position;
-    float speed;
-    float wind;
 };
 
 struct HydrologyMap {
     std::vector<float> height;
-    std::vector<float> water;
-    std::vector<float> wetness;
-    std::vector<float> flow;
-    std::vector<float> waterfall;
-    std::vector<int> downstream;
-    std::vector<int> outlet;
     std::vector<SurfaceVertex> surface;
     std::vector<std::vector<int>> triangles;
     std::unordered_map<int, std::vector<Vector3>> paths;
@@ -288,7 +280,6 @@ std::vector<Cloud> createClouds(std::uint32_t seed, const GenerationSettings& se
             },
             std::clamp(horizontalSize * sizeVariation(engine), 2.2F, 4.8F),
             phase(engine),
-            0.0F,
             seed + static_cast<std::uint32_t>(index) * 2654435761U
         });
     }
@@ -455,12 +446,6 @@ std::vector<SurfaceVertex> extractIslands(std::uint32_t seed, const GenerationSe
 
     const std::size_t surfaceCellCount = static_cast<std::size_t>(kGridX * kGridZ);
     hydrology.height.assign(surfaceCellCount, kVolumeMin.y - 1.0F);
-    hydrology.water.assign(surfaceCellCount, 0.0F);
-    hydrology.wetness.assign(surfaceCellCount, 0.0F);
-    hydrology.flow.assign(surfaceCellCount, 0.0F);
-    hydrology.waterfall.assign(surfaceCellCount, 0.0F);
-    hydrology.downstream.assign(surfaceCellCount, -1);
-    hydrology.outlet.assign(surfaceCellCount, -1);
     hydrology.paths.clear();
     for (int z = 0; z < kGridZ; ++z) {
         for (int x = 0; x < kGridX; ++x) {
@@ -546,8 +531,7 @@ std::vector<SurfaceVertex> extractIslands(std::uint32_t seed, const GenerationSe
 }
 
 Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
-                    int& triangleCount, int& islandCount, HydrologyMap& hydrology,
-                    std::vector<unsigned char>& baseColors) {
+                    int& triangleCount, int& islandCount, HydrologyMap& hydrology) {
     const auto surface = extractIslands(seed, settings, islandCount, hydrology);
     Mesh mesh{};
     mesh.vertexCount = static_cast<int>(surface.size());
@@ -572,7 +556,6 @@ Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
     }
 
     triangleCount = mesh.triangleCount;
-    baseColors.assign(mesh.colors, mesh.colors + mesh.vertexCount * 4);
     UploadMesh(&mesh, false);
     return LoadModelFromMesh(mesh);
 }
@@ -815,259 +798,9 @@ const std::vector<Vector3>& waterPath(HydrologyMap& hydrology, int cell, int des
     return path;
 }
 
-void updateWeather(std::vector<Cloud>& clouds, std::vector<RainDrop>& drops,
-                   std::mt19937& engine, HydrologyMap& hydrology, float deltaTime) {
-    std::uniform_real_distribution<float> unit(-1.0F, 1.0F);
-    std::uniform_real_distribution<float> fallSpeed(10.0F, 16.0F);
-    std::uniform_real_distribution<float> wind(0.25F, 0.65F);
+#include "gpu_water.h"
 
-    for (Cloud& cloud : clouds) {
-        cloud.phase += deltaTime * 0.55F;
-        cloud.rainAccumulator += deltaTime * (18.0F + cloud.size * 4.0F);
-        while (cloud.rainAccumulator >= 1.0F && drops.size() < 900U) {
-            float x = 0.0F;
-            float z = 0.0F;
-            do {
-                x = unit(engine);
-                z = unit(engine);
-            } while (x * x + z * z > 1.0F);
-
-            drops.push_back(RainDrop{
-                Vector3{
-                    cloud.position.x + x * cloud.size * 1.45F,
-                    cloudHeight(cloud) - cloud.size * 0.42F,
-                    cloud.position.z + z * cloud.size
-                },
-                fallSpeed(engine),
-                wind(engine)
-            });
-            cloud.rainAccumulator -= 1.0F;
-        }
-    }
-
-    for (RainDrop& drop : drops) {
-        const float previousY = drop.position.y;
-        drop.position.x += drop.wind * deltaTime;
-        drop.position.y -= drop.speed * deltaTime;
-        const int cell = surfaceCellAt(hydrology, drop.position.x, drop.position.z);
-        if (cell >= 0) {
-            float surface = 0.0F;
-            if (terrainHeight(hydrology, drop.position.x, drop.position.z, previousY + 0.12F, surface) &&
-                previousY >= surface && drop.position.y <= surface + 0.12F) {
-                hydrology.water[static_cast<std::size_t>(cell)] =
-                    std::min(4.0F, hydrology.water[static_cast<std::size_t>(cell)] + 0.045F);
-                hydrology.wetness[static_cast<std::size_t>(cell)] =
-                    std::min(1.0F, hydrology.wetness[static_cast<std::size_t>(cell)] + 0.08F);
-                drop.position.y = kVolumeMin.y - 2.0F;
-            }
-        }
-    }
-    std::erase_if(drops, [](const RainDrop& drop) {
-        return drop.position.y < kVolumeMin.y;
-    });
-}
-
-void updateHydrology(HydrologyMap& hydrology, float deltaTime) {
-    std::vector<float> incoming(hydrology.water.size(), 0.0F);
-    const float flowDecay = std::exp(-deltaTime * 2.2F);
-    constexpr std::array<std::array<int, 2>, 8> kNeighbors{{
-        {-1, -1}, {0, -1}, {1, -1}, {-1, 0},
-        {1, 0}, {-1, 1}, {0, 1}, {1, 1}
-    }};
-
-    for (int z = 0; z < kGridZ; ++z) {
-        for (int x = 0; x < kGridX; ++x) {
-            const int cell = z * kGridX + x;
-            const std::size_t index = static_cast<std::size_t>(cell);
-            if (hydrology.height[index] <= kVolumeMin.y) {
-                continue;
-            }
-
-            hydrology.flow[index] *= flowDecay;
-            hydrology.waterfall[index] *= flowDecay;
-            hydrology.downstream[index] = -1;
-            hydrology.wetness[index] = std::max(0.0F, hydrology.wetness[index] - deltaTime * 0.002F);
-            hydrology.wetness[index] = std::min(
-                1.0F, hydrology.wetness[index] + std::min(1.0F, hydrology.water[index] * 0.4F) * deltaTime);
-            hydrology.water[index] *= std::exp(-deltaTime * 0.006F);
-
-            int lowestNeighbor = -1;
-            const float currentWaterLevel = hydrology.height[index] +
-                                            hydrology.water[index] * kWaterLevelScale;
-            float lowestWaterLevel = currentWaterLevel - 0.025F;
-            float steepestSlope = 0.0F;
-            int airNeighbor = -1;
-            for (const auto& offset : kNeighbors) {
-                const int neighborX = x + offset[0];
-                const int neighborZ = z + offset[1];
-                if (neighborX < 0 || neighborX >= kGridX || neighborZ < 0 || neighborZ >= kGridZ) {
-                    continue;
-                }
-                const int neighbor = neighborZ * kGridX + neighborX;
-                const std::size_t neighborIndex = static_cast<std::size_t>(neighbor);
-                const float neighborHeight = hydrology.height[neighborIndex];
-                if (neighborHeight <= kVolumeMin.y) {
-                    if (airNeighbor < 0 || offset[0] == 0 || offset[1] == 0) airNeighbor = neighbor;
-                } else {
-                    const float neighborWaterLevel = neighborHeight +
-                                                     hydrology.water[neighborIndex] * kWaterLevelScale;
-                    const float distance = std::sqrt(static_cast<float>(offset[0] * offset[0] + offset[1] * offset[1]));
-                    const float slope = (currentWaterLevel - neighborWaterLevel) / distance;
-                    if (neighborWaterLevel < currentWaterLevel - 0.025F && slope > steepestSlope) {
-                        lowestWaterLevel = neighborWaterLevel;
-                        steepestSlope = slope;
-                        lowestNeighbor = neighbor;
-                    }
-                }
-            }
-
-            const float available = lowestNeighbor >= 0
-                ? std::min(hydrology.water[index], (currentWaterLevel - lowestWaterLevel) / (2.0F * kWaterLevelScale))
-                : hydrology.water[index];
-            const float transfer = available * std::min(0.72F, deltaTime * 3.5F);
-            if (lowestNeighbor >= 0 && transfer > 0.00001F) {
-                const auto& path = waterPath(hydrology, cell, lowestNeighbor);
-                const Vector3 landing = path.back();
-                const int receiver = surfaceCellAt(hydrology, landing.x, landing.z);
-                // A cliff path may land farther away than the adjacent grid node.
-                // Keep water at blocked outlets, and deliver falls where they hit.
-                if (receiver == cell) continue;
-                hydrology.water[index] -= transfer;
-                if (receiver >= 0 && landing.y > kVolumeMin.y) {
-                    incoming[static_cast<std::size_t>(receiver)] += transfer;
-                }
-                hydrology.downstream[index] = lowestNeighbor;
-                hydrology.flow[index] = std::max(hydrology.flow[index], transfer / std::max(deltaTime, 0.001F));
-            } else if (airNeighbor >= 0 && transfer > 0.00001F) {
-                const auto& path = waterPath(hydrology, cell, airNeighbor);
-                const Vector3 landing = path.back();
-                const int receiver = surfaceCellAt(hydrology, landing.x, landing.z);
-                if (receiver == cell) continue;
-                hydrology.water[index] -= transfer;
-                if (receiver >= 0 && landing.y > kVolumeMin.y) {
-                    incoming[static_cast<std::size_t>(receiver)] += transfer;
-                }
-                hydrology.downstream[index] = -2;
-                hydrology.outlet[index] = airNeighbor;
-                hydrology.waterfall[index] = std::max(
-                    hydrology.waterfall[index], transfer / std::max(deltaTime, 0.001F));
-            }
-        }
-    }
-
-    for (std::size_t index = 0; index < hydrology.water.size(); ++index) {
-        hydrology.water[index] = std::min(4.0F, hydrology.water[index] + incoming[index]);
-    }
-}
-
-void applyWetness(Model& model, const HydrologyMap& hydrology,
-                  const std::vector<unsigned char>& baseColors) {
-    Mesh& mesh = model.meshes[0];
-    for (int vertex = 0; vertex < mesh.vertexCount; ++vertex) {
-        const int cell = surfaceCellAt(hydrology, mesh.vertices[vertex * 3], mesh.vertices[vertex * 3 + 2]);
-        float wet = 0.0F;
-        if (cell >= 0) {
-            const float verticalDistance = std::abs(
-                hydrology.height[static_cast<std::size_t>(cell)] - mesh.vertices[vertex * 3 + 1]);
-            const float exposure = std::clamp(mesh.normals[vertex * 3 + 1] * 1.6F, 0.0F, 1.0F) *
-                                   std::clamp(1.0F - verticalDistance / 1.8F, 0.0F, 1.0F);
-            wet = hydrology.wetness[static_cast<std::size_t>(cell)] * exposure;
-        }
-
-        const float darkness = 1.0F - wet * 0.42F;
-        mesh.colors[vertex * 4] = static_cast<unsigned char>(
-            static_cast<float>(baseColors[static_cast<std::size_t>(vertex * 4)]) * darkness);
-        mesh.colors[vertex * 4 + 1] = static_cast<unsigned char>(
-            static_cast<float>(baseColors[static_cast<std::size_t>(vertex * 4 + 1)]) * darkness);
-        mesh.colors[vertex * 4 + 2] = static_cast<unsigned char>(std::min(
-            255.0F, static_cast<float>(baseColors[static_cast<std::size_t>(vertex * 4 + 2)]) *
-                          (1.0F - wet * 0.2F) + wet * 20.0F));
-        mesh.colors[vertex * 4 + 3] = 255;
-    }
-    UpdateMeshBuffer(mesh, 3, mesh.colors, mesh.vertexCount * 4 * static_cast<int>(sizeof(unsigned char)), 0);
-}
-
-void drawWaterRibbon(const HydrologyMap& hydrology, const std::vector<Vector3>& path,
-                     float width, Color color) {
-    if (path.size() < 2) return;
-    Vector3 previousLeft{};
-    Vector3 previousRight{};
-    Vector3 side{1.0F, 0.0F, 0.0F};
-    for (std::size_t i = 0; i < path.size(); ++i) {
-        const Vector3 tangent = subtract(path[std::min(i + 1, path.size() - 1)], path[i == 0 ? 0 : i - 1]);
-        if (tangent.x * tangent.x + tangent.z * tangent.z > 0.000001F) {
-            side = normalize(Vector3{-tangent.z, 0.0F, tangent.x});
-        }
-        Vector3 left{path[i].x + side.x * width, path[i].y, path[i].z + side.z * width};
-        Vector3 right{path[i].x - side.x * width, path[i].y, path[i].z - side.z * width};
-        float centerHeight = 0.0F;
-        const bool attached = terrainHeight(hydrology, path[i].x, path[i].z, path[i].y + 0.1F, centerHeight) &&
-                              std::abs(path[i].y - centerHeight) < 0.15F;
-        if (attached) {
-            for (Vector3* bank : {&left, &right}) {
-                float height = 0.0F;
-                if (terrainHeight(hydrology, bank->x, bank->z, path[i].y + 0.4F, height) &&
-                    std::abs(height - centerHeight) < 0.5F) {
-                    bank->y = height + 0.045F;
-                } else {
-                    *bank = path[i];
-                }
-            }
-        }
-        if (i > 0) {
-            DrawTriangle3D(previousLeft, left, right, color);
-            DrawTriangle3D(previousLeft, right, previousRight, color);
-            // A thin water sheet is visible from either side of an overhang.
-            DrawTriangle3D(right, left, previousLeft, color);
-            DrawTriangle3D(previousRight, right, previousLeft, color);
-        }
-        previousLeft = left;
-        previousRight = right;
-    }
-}
-
-void drawHydrology(HydrologyMap& hydrology) {
-    const float cellWidth = (kVolumeMax.x - kVolumeMin.x) / static_cast<float>(kGridX - 1);
-    const float cellDepth = (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1);
-    const float poolRadius = std::min(cellWidth, cellDepth) * 0.62F;
-    for (std::size_t index = 0; index < hydrology.water.size(); ++index) {
-        const float storedWater = hydrology.water[index];
-        const bool standingWater = hydrology.downstream[index] == -1 && storedWater > 0.045F;
-        const bool deepPool = storedWater > 0.14F;
-        if (hydrology.height[index] > kVolumeMin.y && (standingWater || deepPool)) {
-            Vector3 center = surfaceCellPosition(hydrology, static_cast<int>(index));
-            center.y += std::min(1.4F, storedWater * kWaterLevelScale) + 0.025F;
-            const unsigned char alpha = static_cast<unsigned char>(std::clamp(
-                105.0F + storedWater * 120.0F, 105.0F, 205.0F));
-            DrawCylinder(center, poolRadius, poolRadius, 0.05F, 10,
-                         Color{42, 124, 166, alpha});
-        }
-    }
-
-    for (std::size_t index = 0; index < hydrology.flow.size(); ++index) {
-        if (hydrology.downstream[index] >= 0 && hydrology.flow[index] > 0.008F) {
-            const float strength = std::clamp(std::sqrt(hydrology.flow[index]) * 0.12F, 0.025F, 0.2F);
-            drawWaterRibbon(hydrology, waterPath(hydrology, static_cast<int>(index), hydrology.downstream[index]),
-                            strength, Color{54, 139, 178, 220});
-        } else if (hydrology.downstream[index] == -2 && hydrology.outlet[index] >= 0 &&
-                   hydrology.waterfall[index] > 0.012F) {
-            const float strength = std::clamp(std::sqrt(hydrology.waterfall[index]) * 0.14F,
-                                              0.035F, 0.24F);
-            drawWaterRibbon(hydrology, waterPath(hydrology, static_cast<int>(index), hydrology.outlet[index]),
-                            strength, Color{104, 181, 211, 205});
-        }
-    }
-}
-
-void drawWeather(const std::vector<Cloud>& clouds, const std::vector<RainDrop>& drops) {
-    for (const RainDrop& drop : drops) {
-        DrawLine3D(drop.position,
-                   Vector3{drop.position.x - drop.wind * 0.035F,
-                           drop.position.y + 0.55F,
-                           drop.position.z},
-                   Color{151, 203, 222, 175});
-    }
-
+void drawClouds(const std::vector<Cloud>& clouds, const Model& sphere) {
     constexpr std::array<Vector3, 8> kPuffOffsets{{
         {-0.95F, -0.08F, 0.0F}, {-0.45F, 0.22F, -0.12F}, {0.0F, 0.02F, 0.12F},
         {0.48F, 0.25F, -0.08F}, {0.98F, -0.05F, 0.08F}, {-0.35F, -0.2F, 0.24F},
@@ -1082,45 +815,69 @@ void drawWeather(const std::vector<Cloud>& clouds, const std::vector<RainDrop>& 
             const Color color = index == 5 || index == 6
                 ? Color{128, 145, 151, 245}
                 : Color{190, 203, 201, 250};
-            DrawSphereEx(Vector3{
+            DrawModel(sphere, Vector3{
                              cloud.position.x + offset.x * cloud.size,
                              height + offset.y * cloud.size,
                              cloud.position.z + offset.z * cloud.size
                          },
-                         radius, 8, 12, color);
+                          radius, color);
         }
     }
 }
 
 } // namespace
 
-int main() {
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+int main(int argc, char** argv) {
+    int benchmarkFrames = 0;
+    float warmupSeconds = 0;
+    bool hidden = false;
+    const char* screenshot = nullptr;
+    std::uint32_t requestedSeed = 0;
+    bool fixedSeed = false;
+    float initialYaw = 0.72F;
+    float initialPitch = 0.32F;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--benchmark" && i + 1 < argc) benchmarkFrames = std::max(1, std::atoi(argv[++i]));
+        else if (arg == "--warmup-seconds" && i + 1 < argc) warmupSeconds = std::max(0.0F, static_cast<float>(std::atof(argv[++i])));
+        else if (arg == "--seed" && i + 1 < argc) { requestedSeed = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)); fixedSeed = true; }
+        else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
+        else if (arg == "--hidden") hidden = true;
+        else if (arg == "--yaw" && i + 1 < argc) initialYaw = static_cast<float>(std::atof(argv[++i]));
+        else if (arg == "--pitch" && i + 1 < argc) initialPitch = std::clamp(static_cast<float>(std::atof(argv[++i])), -1.25F, 1.25F);
+        else { TraceLog(LOG_ERROR, "Usage: noise_islands [--seed N] [--benchmark FRAMES] [--warmup-seconds N] [--screenshot PATH] [--hidden] [--yaw RADIANS] [--pitch RADIANS]"); return 1; }
+    }
+    unsigned int flags = FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE;
+    if (benchmarkFrames == 0) flags |= FLAG_VSYNC_HINT;
+    if (hidden) flags |= FLAG_WINDOW_HIDDEN;
+    SetConfigFlags(flags);
     InitWindow(1280, 760, "Volumetric Noise Islands");
     SetWindowMinSize(1000, 650);
-    SetTargetFPS(60);
+    SetTargetFPS(benchmarkFrames > 0 ? 0 : 60);
 
     std::mt19937 randomEngine(std::random_device{}());
     std::uniform_int_distribution<std::uint32_t> seedDistribution;
-    std::uint32_t seed = seedDistribution(randomEngine);
+    std::uint32_t seed = fixedSeed ? requestedSeed : seedDistribution(randomEngine);
     GenerationSettings settings;
     int triangleCount = 0;
     int islandCount = 0;
     HydrologyMap hydrology;
-    std::vector<unsigned char> baseColors;
-    Model islands = createIslands(seed, settings, triangleCount, islandCount,
-                                  hydrology, baseColors);
+    Model islands = createIslands(seed, settings, triangleCount, islandCount, hydrology);
     std::vector<Cloud> clouds = createClouds(seed, settings);
-    std::vector<RainDrop> rainDrops;
-    std::mt19937 weatherEngine(seed ^ 0x9e3779b9U);
+    GpuWater gpu = createGpuWater(hydrology, static_cast<int>(clouds.size()));
+    islands.materials[0].shader = gpu.terrainShader;
+    for (int step = 0; step < static_cast<int>(warmupSeconds / kWaterStep); ++step) {
+        stepGpuWater(gpu, clouds);
+        gpu.time += kWaterStep;
+    }
     TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
              islandCount, triangleCount, seed);
 
-    float yaw = 0.72F;
-    float pitch = 0.32F;
+    float yaw = initialYaw;
+    float pitch = initialPitch;
     float distance = 52.0F;
     bool wireframe = false;
-    bool autoRotate = true;
+    bool autoRotate = benchmarkFrames == 0;
     bool rebuildRequested = false;
 
     Camera3D camera{};
@@ -1129,8 +886,14 @@ int main() {
     camera.fovy = 45.0F;
     camera.projection = CAMERA_PERSPECTIVE;
 
+    int renderedFrames = 0;
+    double benchmarkStart = 0;
+    // Offscreen rendering is required for meaningful hidden-window benchmarks:
+    // drivers may skip all rasterization to an unmapped default framebuffer.
+    RenderTexture2D benchmarkTarget{};
+    if (benchmarkFrames > 0) benchmarkTarget = LoadRenderTexture(1280, 760);
     while (!WindowShouldClose()) {
-        const float deltaTime = GetFrameTime();
+        const float deltaTime = benchmarkFrames > 0 ? kWaterStep : GetFrameTime();
         if (IsKeyPressed(KEY_SPACE)) {
             seed = seedDistribution(randomEngine);
             rebuildRequested = true;
@@ -1161,24 +924,25 @@ int main() {
             std::sin(pitch) * distance + 1.5F,
             std::sin(yaw) * std::cos(pitch) * distance
         };
-        updateWeather(clouds, rainDrops, weatherEngine, hydrology, deltaTime);
-        updateHydrology(hydrology, deltaTime);
-        applyWetness(islands, hydrology, baseColors);
+        for (Cloud& cloud : clouds) cloud.phase += deltaTime * 0.55F;
+        updateGpuWater(gpu, clouds, deltaTime);
 
         BeginDrawing();
+        if (benchmarkFrames > 0) BeginTextureMode(benchmarkTarget);
         ClearBackground(Color{5, 10, 19, 255});
         DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(),
                                Color{18, 33, 48, 255}, Color{3, 7, 15, 255});
         drawStars();
 
         BeginMode3D(camera);
+        bindWaterTextures(islands, gpu);
         if (wireframe) {
             DrawModelWires(islands, Vector3{0.0F, 0.0F, 0.0F}, 1.0F, Color{174, 224, 206, 255});
         } else {
             DrawModel(islands, Vector3{0.0F, 0.0F, 0.0F}, 1.0F, WHITE);
         }
-        drawHydrology(hydrology);
-        drawWeather(clouds, rainDrops);
+        drawGpuWater(gpu, clouds, camera);
+        drawClouds(clouds, gpu.cloudSphere);
         EndMode3D();
 
         drawInterface(seed, islandCount, triangleCount);
@@ -1189,16 +953,39 @@ int main() {
             seed = seedDistribution(randomEngine);
             rebuildRequested = true;
         }
-        DrawFPS(GetScreenWidth() - static_cast<int>(kSidebarWidth) - 92, GetScreenHeight() - 34);
+        if (benchmarkFrames > 0) {
+            DrawText("GPU BENCHMARK", GetScreenWidth() - static_cast<int>(kSidebarWidth) - 145,
+                     GetScreenHeight() - 34, 16, Color{116, 202, 183, 255});
+        } else DrawFPS(GetScreenWidth() - static_cast<int>(kSidebarWidth) - 92, GetScreenHeight() - 34);
+        if (benchmarkFrames > 0) EndTextureMode();
         EndDrawing();
+        ++renderedFrames;
+        // Exclude initialization/shader warm-up from the measured interval.
+        if (benchmarkFrames > 0 && renderedFrames == 30) {
+            Image sync = LoadImageFromTexture(benchmarkTarget.texture);
+            UnloadImage(sync);
+            benchmarkStart = GetTime();
+        }
+        if (benchmarkFrames > 0 && renderedFrames >= benchmarkFrames + 30) {
+            Image image = LoadImageFromTexture(benchmarkTarget.texture); // finish GPU work before timing
+            const double elapsed = GetTime() - benchmarkStart;
+            TraceLog(LOG_INFO, "BENCHMARK: %d frames, %.2f ms/frame, %.1f FPS (1280x760 offscreen, seed %u)",
+                     benchmarkFrames, elapsed * 1000.0 / benchmarkFrames, benchmarkFrames / elapsed, seed);
+            if (screenshot) {
+                ImageFlipVertical(&image);
+                ExportImage(image, screenshot);
+            }
+            UnloadImage(image);
+            break;
+        }
 
         if (rebuildRequested) {
             UnloadModel(islands);
-            islands = createIslands(seed, settings, triangleCount, islandCount,
-                                    hydrology, baseColors);
+            unloadGpuWater(gpu);
+            islands = createIslands(seed, settings, triangleCount, islandCount, hydrology);
             clouds = createClouds(seed, settings);
-            rainDrops.clear();
-            weatherEngine.seed(seed ^ 0x9e3779b9U);
+            gpu = createGpuWater(hydrology, static_cast<int>(clouds.size()));
+            islands.materials[0].shader = gpu.terrainShader;
             TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
                      islandCount, triangleCount, seed);
             rebuildRequested = false;
@@ -1206,6 +993,8 @@ int main() {
     }
 
     UnloadModel(islands);
+    unloadGpuWater(gpu);
+    if (benchmarkTarget.id != 0) UnloadRenderTexture(benchmarkTarget);
     CloseWindow();
     return 0;
 }

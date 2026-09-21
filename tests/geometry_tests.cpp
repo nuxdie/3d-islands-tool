@@ -101,22 +101,15 @@ void checkWater() {
     for (const Vector3 p : fall) require(p.y >= 0.0F, "Waterfall penetrated receiving island");
     const int receiver = surfaceCellAt(cliff, fall.back().x, fall.back().z);
     require(receiver >= 0 && receiver != cell + 1, "Fixture must land beyond adjacent cell");
-    cliff.water.assign(kGridX * kGridZ, 0.0F);
-    cliff.wetness.assign(kGridX * kGridZ, 0.0F);
-    cliff.flow.assign(kGridX * kGridZ, 0.0F);
-    cliff.waterfall.assign(kGridX * kGridZ, 0.0F);
-    cliff.downstream.assign(kGridX * kGridZ, -1);
-    cliff.outlet.assign(kGridX * kGridZ, -1);
-    cliff.water[cell] = 0.2F;
-    updateHydrology(cliff, 0.016F);
-    require(cliff.water[receiver] > 0.0F, "Water was not delivered to waterfall landing");
-    float total = 0.0F;
-    for (float water : cliff.water) {
-        require(water >= 0.0F && std::isfinite(water), "Invalid water quantity");
-        total += water;
+    const WaterBake bake = bakeWater(cliff, false);
+    require(static_cast<int>(bake.routes[cell].y) == receiver, "GPU route misses waterfall landing");
+    bool foundIncoming = false;
+    const int first = static_cast<int>(bake.terrain[receiver].y);
+    const int count = static_cast<int>(bake.terrain[receiver].z);
+    for (int i = first; i < first + count; ++i) {
+        foundIncoming |= static_cast<int>(bake.incoming[i].x) == cell && bake.incoming[i].y == 1.0F;
     }
-    require(std::abs(total - 0.2F * std::exp(-0.016F * 0.006F)) < 0.00001F,
-            "Water transfer did not conserve volume after evaporation");
+    require(foundIncoming, "GPU incoming-edge list does not contain waterfall source");
 
     HydrologyMap edge;
     addPlane(edge, -4.0F, 0.0F, 4.0F, 4.0F);
