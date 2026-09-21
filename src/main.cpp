@@ -444,7 +444,8 @@ void drawInterface(std::uint32_t seed, int islandCount, int triangleCount) {
 }
 
 bool drawSlider(const char* label, const char* description, float& value,
-                float minimum, float maximum, float x, float y, const char* valueFormat) {
+                float minimum, float maximum, float wheelStep,
+                float x, float y, const char* valueFormat) {
     const float width = kSidebarWidth - 48.0F;
     const Rectangle hitArea{x, y + 32.0F, width, 24.0F};
     const Vector2 mouse = GetMousePosition();
@@ -454,6 +455,14 @@ bool drawSlider(const char* label, const char* description, float& value,
             std::clamp((mouse.x - x) / width, 0.0F, 1.0F) * (maximum - minimum);
         changed = std::abs(nextValue - value) > 0.0001F;
         value = nextValue;
+    }
+    if (CheckCollisionPointRec(mouse, hitArea)) {
+        const float wheel = GetMouseWheelMove();
+        if (wheel != 0.0F) {
+            const float nextValue = std::clamp(value + wheel * wheelStep, minimum, maximum);
+            changed |= std::abs(nextValue - value) > 0.0001F;
+            value = nextValue;
+        }
     }
 
     DrawText(label, static_cast<int>(x), static_cast<int>(y), 13, Color{181, 198, 201, 255});
@@ -498,23 +507,28 @@ SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
     bool settingsChanged = false;
     float count = static_cast<float>(settings.islandCount);
     if (drawSlider("ISLAND COUNT", "Number of floating base volumes", count,
-                   1.0F, 10.0F, controlX, 76.0F, "%.0f")) {
+                   1.0F, 10.0F, 1.0F, controlX, 76.0F, "%.0f")) {
         const int nextCount = static_cast<int>(std::round(count));
         settingsChanged = nextCount != settings.islandCount;
         settings.islandCount = nextCount;
     }
     settingsChanged |= drawSlider("ISLAND SCALE", "Overall width and depth of each island",
-                                  settings.islandScale, 0.55F, 1.35F, controlX, 140.0F, "%.2f");
+                                  settings.islandScale, 0.55F, 1.35F, 0.02F,
+                                  controlX, 140.0F, "%.2f");
     settingsChanged |= drawSlider("VERTICAL SCALE", "Stretches or flattens island height",
-                                  settings.verticalScale, 0.55F, 1.45F, controlX, 204.0F, "%.2f");
+                                  settings.verticalScale, 0.55F, 1.45F, 0.02F,
+                                  controlX, 204.0F, "%.2f");
     settingsChanged |= drawSlider("SURFACE ROUGHNESS", "Strength of the 3D rock deformation",
-                                  settings.roughness, 0.0F, 1.25F, controlX, 268.0F, "%.2f");
+                                  settings.roughness, 0.0F, 1.25F, 0.03F,
+                                  controlX, 268.0F, "%.2f");
     settingsChanged |= drawSlider("CAVE SIZE", "Radius of the cellular cave chambers",
-                                  settings.caveSize, 0.12F, 0.58F, controlX, 332.0F, "%.2f");
+                                  settings.caveSize, 0.12F, 0.58F, 0.01F,
+                                  controlX, 332.0F, "%.2f");
     settingsChanged |= drawSlider("CAVE STRENGTH", "How deeply caves cut through the rock",
-                                  settings.caveStrength, 0.25F, 1.9F, controlX, 396.0F, "%.2f");
+                                  settings.caveStrength, 0.25F, 1.9F, 0.03F,
+                                  controlX, 396.0F, "%.2f");
 
-    DrawText("SLIDERS REBUILD THE MESH LIVE", static_cast<int>(controlX), 461, 11,
+    DrawText("DRAG OR SCROLL - MESH UPDATES LIVE", static_cast<int>(controlX), 461, 11,
              Color{91, 151, 139, 255});
 
     SidebarAction action = settingsChanged ? SidebarAction::rebuild : SidebarAction::none;
