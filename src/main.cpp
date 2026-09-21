@@ -48,6 +48,20 @@ struct GenerationSettings {
     float caveStrength = 1.36F;
 };
 
+struct Cloud {
+    Vector3 position;
+    float size;
+    float phase;
+    float rainAccumulator;
+    std::uint32_t shapeSeed;
+};
+
+struct RainDrop {
+    Vector3 position;
+    float speed;
+    float wind;
+};
+
 enum class SidebarAction {
     none,
     rebuild,
@@ -237,6 +251,33 @@ std::vector<IslandShape> createIslandConfiguration(std::uint32_t seed,
         islands.push_back(candidate);
     }
     return islands;
+}
+
+std::vector<Cloud> createClouds(std::uint32_t seed, const GenerationSettings& settings) {
+    const std::vector<IslandShape> islands = createIslandConfiguration(seed, settings);
+    std::mt19937 engine(seed ^ 0xa341316cU);
+    std::uniform_real_distribution<float> offset(-1.8F, 1.8F);
+    std::uniform_real_distribution<float> sizeVariation(0.85F, 1.2F);
+    std::uniform_real_distribution<float> phase(0.0F, 6.28318F);
+
+    std::vector<Cloud> clouds;
+    clouds.reserve(islands.size());
+    for (std::size_t index = 0; index < islands.size(); ++index) {
+        const IslandShape& island = islands[index];
+        const float horizontalSize = (island.radius.x + island.radius.z) * 0.22F;
+        clouds.push_back(Cloud{
+            Vector3{
+                island.center.x + offset(engine),
+                std::clamp(island.center.y + island.radius.y + 4.5F, 12.0F, 20.0F),
+                island.center.z + offset(engine)
+            },
+            std::clamp(horizontalSize * sizeVariation(engine), 2.2F, 4.8F),
+            phase(engine),
+            0.0F,
+            seed + static_cast<std::uint32_t>(index) * 2654435761U
+        });
+    }
+    return clouds;
 }
 
 float densityAt(const Vector3& point, std::uint32_t seed,
@@ -583,6 +624,82 @@ void drawStars() {
     }
 }
 
+float cloudHeight(const Cloud& cloud) {
+    return cloud.position.y + std::sin(cloud.phase) * 0.22F;
+}
+
+void updateWeather(std::vector<Cloud>& clouds, std::vector<RainDrop>& drops,
+                   std::mt19937& engine, float deltaTime) {
+    std::uniform_real_distribution<float> unit(-1.0F, 1.0F);
+    std::uniform_real_distribution<float> fallSpeed(10.0F, 16.0F);
+    std::uniform_real_distribution<float> wind(0.25F, 0.65F);
+
+    for (Cloud& cloud : clouds) {
+        cloud.phase += deltaTime * 0.55F;
+        cloud.rainAccumulator += deltaTime * (18.0F + cloud.size * 4.0F);
+        while (cloud.rainAccumulator >= 1.0F && drops.size() < 900U) {
+            float x = 0.0F;
+            float z = 0.0F;
+            do {
+                x = unit(engine);
+                z = unit(engine);
+            } while (x * x + z * z > 1.0F);
+
+            drops.push_back(RainDrop{
+                Vector3{
+                    cloud.position.x + x * cloud.size * 1.45F,
+                    cloudHeight(cloud) - cloud.size * 0.42F,
+                    cloud.position.z + z * cloud.size
+                },
+                fallSpeed(engine),
+                wind(engine)
+            });
+            cloud.rainAccumulator -= 1.0F;
+        }
+    }
+
+    for (RainDrop& drop : drops) {
+        drop.position.x += drop.wind * deltaTime;
+        drop.position.y -= drop.speed * deltaTime;
+    }
+    std::erase_if(drops, [](const RainDrop& drop) {
+        return drop.position.y < kVolumeMin.y;
+    });
+}
+
+void drawWeather(const std::vector<Cloud>& clouds, const std::vector<RainDrop>& drops) {
+    for (const RainDrop& drop : drops) {
+        DrawLine3D(drop.position,
+                   Vector3{drop.position.x - drop.wind * 0.035F,
+                           drop.position.y + 0.55F,
+                           drop.position.z},
+                   Color{151, 203, 222, 175});
+    }
+
+    constexpr std::array<Vector3, 8> kPuffOffsets{{
+        {-0.95F, -0.08F, 0.0F}, {-0.45F, 0.22F, -0.12F}, {0.0F, 0.02F, 0.12F},
+        {0.48F, 0.25F, -0.08F}, {0.98F, -0.05F, 0.08F}, {-0.35F, -0.2F, 0.24F},
+        {0.35F, -0.18F, 0.3F}, {0.05F, 0.38F, -0.24F}
+    }};
+    for (const Cloud& cloud : clouds) {
+        const float height = cloudHeight(cloud);
+        for (std::size_t index = 0; index < kPuffOffsets.size(); ++index) {
+            const Vector3& offset = kPuffOffsets[index];
+            const float variation = 0.82F + randomAt(static_cast<int>(index), 0, 0, cloud.shapeSeed) * 0.32F;
+            const float radius = cloud.size * 0.42F * variation;
+            const Color color = index == 5 || index == 6
+                ? Color{128, 145, 151, 245}
+                : Color{190, 203, 201, 250};
+            DrawSphereEx(Vector3{
+                             cloud.position.x + offset.x * cloud.size,
+                             height + offset.y * cloud.size,
+                             cloud.position.z + offset.z * cloud.size
+                         },
+                         radius, 8, 12, color);
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -598,6 +715,9 @@ int main() {
     int triangleCount = 0;
     int islandCount = 0;
     Model islands = createIslands(seed, settings, triangleCount, islandCount);
+    std::vector<Cloud> clouds = createClouds(seed, settings);
+    std::vector<RainDrop> rainDrops;
+    std::mt19937 weatherEngine(seed ^ 0x9e3779b9U);
     TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
              islandCount, triangleCount, seed);
 
@@ -615,6 +735,7 @@ int main() {
     camera.projection = CAMERA_PERSPECTIVE;
 
     while (!WindowShouldClose()) {
+        const float deltaTime = GetFrameTime();
         if (IsKeyPressed(KEY_SPACE)) {
             seed = seedDistribution(randomEngine);
             rebuildRequested = true;
@@ -634,7 +755,7 @@ int main() {
             pitch = std::clamp(pitch + delta.y * 0.006F, -1.25F, 1.25F);
             autoRotate = false;
         } else if (autoRotate) {
-            yaw += GetFrameTime() * 0.08F;
+            yaw += deltaTime * 0.08F;
         }
         if (!mouseOverSidebar) {
             distance = std::clamp(distance - GetMouseWheelMove() * 2.5F, 24.0F, 82.0F);
@@ -645,6 +766,7 @@ int main() {
             std::sin(pitch) * distance + 1.5F,
             std::sin(yaw) * std::cos(pitch) * distance
         };
+        updateWeather(clouds, rainDrops, weatherEngine, deltaTime);
 
         BeginDrawing();
         ClearBackground(Color{5, 10, 19, 255});
@@ -658,6 +780,7 @@ int main() {
         } else {
             DrawModel(islands, Vector3{0.0F, 0.0F, 0.0F}, 1.0F, WHITE);
         }
+        drawWeather(clouds, rainDrops);
         EndMode3D();
 
         drawInterface(seed, islandCount, triangleCount);
@@ -674,6 +797,9 @@ int main() {
         if (rebuildRequested) {
             UnloadModel(islands);
             islands = createIslands(seed, settings, triangleCount, islandCount);
+            clouds = createClouds(seed, settings);
+            rainDrops.clear();
+            weatherEngine.seed(seed ^ 0x9e3779b9U);
             TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
                      islandCount, triangleCount, seed);
             rebuildRequested = false;
