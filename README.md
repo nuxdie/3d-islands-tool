@@ -23,4 +23,4 @@ cmake --build build -j
 | `R` | Toggle automatic rotation |
 | `Esc` | Quit |
 
-The sidebar controls island count, overall and vertical scale, surface roughness, cave size, and cave strength. Use **Apply Parameters** to rebuild the current seed or **New Random Seed** to create a different configuration with the selected parameters.
+The sidebar controls island count, overall and vertical scale, surface roughness, cave size, and cave strength. The mesh updates while a slider is dragged. Use **New Random Seed** to create a different configuration with the selected parameters.

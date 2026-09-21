@@ -14,7 +14,7 @@ constexpr int kGridY = 40;
 constexpr int kGridZ = 56;
 constexpr Vector3 kVolumeMin{-27.0F, -14.0F, -27.0F};
 constexpr Vector3 kVolumeMax{27.0F, 17.0F, 27.0F};
-constexpr float kSidebarWidth = 300.0F;
+constexpr float kSidebarWidth = 400.0F;
 
 struct Sample {
     Vector3 position;
@@ -443,10 +443,10 @@ void drawInterface(std::uint32_t seed, int islandCount, int triangleCount) {
     DrawText("DRAG orbit   WHEEL zoom   SPACE new seed", 36, 108, 12, Color{190, 204, 201, 255});
 }
 
-bool drawSlider(const char* label, float& value, float minimum, float maximum,
-                float x, float y, const char* valueFormat) {
+bool drawSlider(const char* label, const char* description, float& value,
+                float minimum, float maximum, float x, float y, const char* valueFormat) {
     const float width = kSidebarWidth - 48.0F;
-    const Rectangle hitArea{x, y + 20.0F, width, 24.0F};
+    const Rectangle hitArea{x, y + 32.0F, width, 24.0F};
     const Vector2 mouse = GetMousePosition();
     bool changed = false;
     if (CheckCollisionPointRec(mouse, hitArea) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
@@ -460,11 +460,13 @@ bool drawSlider(const char* label, float& value, float minimum, float maximum,
     const char* valueText = TextFormat(valueFormat, value);
     DrawText(valueText, static_cast<int>(x + width - static_cast<float>(MeasureText(valueText, 13))),
              static_cast<int>(y), 13, Color{116, 202, 183, 255});
-    DrawRectangleRounded(Rectangle{x, y + 28.0F, width, 4.0F}, 1.0F, 4, Color{47, 68, 76, 255});
+    DrawText(description, static_cast<int>(x), static_cast<int>(y + 18.0F), 10,
+             Color{105, 126, 133, 255});
+    DrawRectangleRounded(Rectangle{x, y + 41.0F, width, 4.0F}, 1.0F, 4, Color{47, 68, 76, 255});
     const float amount = (value - minimum) / (maximum - minimum);
-    DrawRectangleRounded(Rectangle{x, y + 28.0F, width * amount, 4.0F}, 1.0F, 4,
+    DrawRectangleRounded(Rectangle{x, y + 41.0F, width * amount, 4.0F}, 1.0F, 4,
                          Color{72, 166, 149, 255});
-    DrawCircleV(Vector2{x + width * amount, y + 30.0F}, 6.0F,
+    DrawCircleV(Vector2{x + width * amount, y + 43.0F}, 6.0F,
                 CheckCollisionPointRec(mouse, hitArea) ? Color{229, 220, 184, 255}
                                                        : Color{154, 210, 194, 255});
     return changed;
@@ -483,7 +485,7 @@ bool drawButton(const Rectangle& bounds, const char* label, bool emphasized = fa
 }
 
 SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
-                          bool& settingsDirty, bool wireframe, bool autoRotate) {
+                          bool wireframe, bool autoRotate) {
     const float panelX = static_cast<float>(GetScreenWidth()) - kSidebarWidth;
     const float controlX = panelX + 24.0F;
     DrawRectangle(static_cast<int>(panelX), 0, static_cast<int>(kSidebarWidth), GetScreenHeight(),
@@ -493,43 +495,39 @@ SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
     DrawText(TextFormat("SEED %u", seed), static_cast<int>(controlX), 49, 12,
              Color{102, 158, 155, 255});
 
+    bool settingsChanged = false;
     float count = static_cast<float>(settings.islandCount);
-    if (drawSlider("ISLAND COUNT", count, 1.0F, 10.0F, controlX, 76.0F, "%.0f")) {
-        settings.islandCount = static_cast<int>(std::round(count));
-        settingsDirty = true;
+    if (drawSlider("ISLAND COUNT", "Number of floating base volumes", count,
+                   1.0F, 10.0F, controlX, 76.0F, "%.0f")) {
+        const int nextCount = static_cast<int>(std::round(count));
+        settingsChanged = nextCount != settings.islandCount;
+        settings.islandCount = nextCount;
     }
-    settingsDirty |= drawSlider("ISLAND SCALE", settings.islandScale, 0.55F, 1.35F,
-                                controlX, 124.0F, "%.2f");
-    settingsDirty |= drawSlider("VERTICAL SCALE", settings.verticalScale, 0.55F, 1.45F,
-                                controlX, 172.0F, "%.2f");
-    settingsDirty |= drawSlider("SURFACE ROUGHNESS", settings.roughness, 0.0F, 1.25F,
-                                controlX, 220.0F, "%.2f");
-    settingsDirty |= drawSlider("CAVE SIZE", settings.caveSize, 0.12F, 0.58F,
-                                controlX, 268.0F, "%.2f");
-    settingsDirty |= drawSlider("CAVE STRENGTH", settings.caveStrength, 0.25F, 1.9F,
-                                controlX, 316.0F, "%.2f");
+    settingsChanged |= drawSlider("ISLAND SCALE", "Overall width and depth of each island",
+                                  settings.islandScale, 0.55F, 1.35F, controlX, 140.0F, "%.2f");
+    settingsChanged |= drawSlider("VERTICAL SCALE", "Stretches or flattens island height",
+                                  settings.verticalScale, 0.55F, 1.45F, controlX, 204.0F, "%.2f");
+    settingsChanged |= drawSlider("SURFACE ROUGHNESS", "Strength of the 3D rock deformation",
+                                  settings.roughness, 0.0F, 1.25F, controlX, 268.0F, "%.2f");
+    settingsChanged |= drawSlider("CAVE SIZE", "Radius of the cellular cave chambers",
+                                  settings.caveSize, 0.12F, 0.58F, controlX, 332.0F, "%.2f");
+    settingsChanged |= drawSlider("CAVE STRENGTH", "How deeply caves cut through the rock",
+                                  settings.caveStrength, 0.25F, 1.9F, controlX, 396.0F, "%.2f");
 
-    if (settingsDirty) {
-        DrawText("PARAMETERS CHANGED", static_cast<int>(controlX), 359, 11, Color{225, 171, 100, 255});
-    } else {
-        DrawText("MESH UP TO DATE", static_cast<int>(controlX), 359, 11, Color{91, 151, 139, 255});
-    }
+    DrawText("SLIDERS REBUILD THE MESH LIVE", static_cast<int>(controlX), 461, 11,
+             Color{91, 151, 139, 255});
 
-    SidebarAction action = SidebarAction::none;
-    if (drawButton(Rectangle{controlX, 380.0F, kSidebarWidth - 48.0F, 36.0F},
-                   "APPLY PARAMETERS", true)) {
-        action = SidebarAction::rebuild;
-    }
-    if (drawButton(Rectangle{controlX, 426.0F, kSidebarWidth - 48.0F, 36.0F},
-                   "NEW RANDOM SEED")) {
+    SidebarAction action = settingsChanged ? SidebarAction::rebuild : SidebarAction::none;
+    if (drawButton(Rectangle{controlX, 482.0F, kSidebarWidth - 48.0F, 36.0F},
+                   "NEW RANDOM SEED", true)) {
         action = SidebarAction::newSeed;
     }
 
     const char* mode = wireframe ? "WIREFRAME" : "SOLID";
     const char* motion = autoRotate ? "AUTO" : "MANUAL";
-    DrawText(TextFormat("W  %s", mode), static_cast<int>(controlX), 478, 12,
+    DrawText(TextFormat("W  %s", mode), static_cast<int>(controlX), 538, 12,
              Color{160, 179, 181, 255});
-    DrawText(TextFormat("R  ROTATION %s", motion), static_cast<int>(controlX + 105.0F), 478, 12,
+    DrawText(TextFormat("R  ROTATION %s", motion), static_cast<int>(controlX + 112.0F), 538, 12,
              Color{160, 179, 181, 255});
     return action;
 }
@@ -551,7 +549,7 @@ void drawStars() {
 int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1280, 760, "Volumetric Noise Islands");
-    SetWindowMinSize(800, 500);
+    SetWindowMinSize(1000, 650);
     SetTargetFPS(60);
 
     std::mt19937 randomEngine(std::random_device{}());
@@ -569,7 +567,6 @@ int main() {
     float distance = 52.0F;
     bool wireframe = false;
     bool autoRotate = true;
-    bool settingsDirty = false;
     bool rebuildRequested = false;
 
     Camera3D camera{};
@@ -625,8 +622,7 @@ int main() {
         EndMode3D();
 
         drawInterface(seed, islandCount, triangleCount);
-        const SidebarAction sidebarAction = drawSidebar(settings, seed, settingsDirty,
-                                                        wireframe, autoRotate);
+        const SidebarAction sidebarAction = drawSidebar(settings, seed, wireframe, autoRotate);
         if (sidebarAction == SidebarAction::rebuild) {
             rebuildRequested = true;
         } else if (sidebarAction == SidebarAction::newSeed) {
@@ -641,7 +637,6 @@ int main() {
             islands = createIslands(seed, settings, triangleCount, islandCount);
             TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
                      islandCount, triangleCount, seed);
-            settingsDirty = false;
             rebuildRequested = false;
         }
     }
