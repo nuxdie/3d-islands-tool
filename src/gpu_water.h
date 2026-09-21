@@ -183,7 +183,7 @@ GpuWater createGpuWater(HydrologyMap& map, int cloudCount) {
     gpu.terrainShader = waterShader(waterShaders::terrainVertex, waterShaders::terrainFragment);
     gpu.lakeShader = waterShader(waterShaders::lakeVertex, waterShaders::lakeFragment, waterShaders::lakeSampling);
     gpu.riverShader = waterShader(waterShaders::riverVertex, waterShaders::riverFragment);
-    gpu.rainShader = waterShader(waterShaders::rainVertex, waterShaders::rainFragment);
+    gpu.rainShader = waterShader(waterShaders::rainVertex, waterShaders::rainFragment, waterShaders::rainMotion);
     gpu.rivers = waterModel(bake.rivers, gpu.riverShader);
 
     const int width = (kGridX - 1) * kPoolSubdivisions + 1;
@@ -286,7 +286,7 @@ void drawGpuWater(GpuWater& gpu, const std::vector<Cloud>& clouds, const Camera3
     }
     std::array<Vector4,10> rain{};
     for (std::size_t i = 0; i < clouds.size() && i < rain.size(); ++i) {
-        rain[i] = Vector4{clouds[i].position.x, cloudHeight(clouds[i]), clouds[i].position.z, clouds[i].size};
+        rain[i] = Vector4{clouds[i].position.x, clouds[i].position.y, clouds[i].position.z, clouds[i].size};
     }
     const Vector3 right = normalize(cross(subtract(camera.target, camera.position), camera.up));
     SetShaderValueV(gpu.rainShader, GetShaderLocation(gpu.rainShader, "rainClouds"), rain.data(), SHADER_UNIFORM_VEC4, 10);

@@ -9,6 +9,7 @@ The surface uses an 88 × 60 × 88 sampling grid, consistent outward triangle wi
 - Water depth, rainfall, downhill flux, and wetness run in floating-point GPU textures at a fixed 60 Hz, using OpenGL 3.3 fragment passes. Water exchanges with all four neighboring cells according to surface elevation, so adjacent pools spread and settle to a shared level. The former per-cell storage cap is removed.
 - Lakes use a connected, GPU-displaced surface with terrain-clipped shorelines instead of individual cylinders. Shallow runoff darkens the terrain; accumulated flows produce animated river ribbons.
 - River banks, waterfall paths, and receiving-island connections are baked once when the terrain changes. River widths/visibility, water ripples, rain particles, and terrain wet shading are computed by shaders. The running simulation has no CPU terrain raycasts, per-vertex color rewrites, mesh uploads, or GPU readbacks.
+- Rain uses fixed emission heights and lifetimes so cloud bobbing cannot move live drops upward. Drops disappear at terrain/water impact and respawn at new positions instead of repeatedly jumping up the same columns.
 - Terrain generation and water-path baking still run on the CPU during startup and generator changes. Clouds reuse an uploaded sphere mesh.
 
 ## Build
@@ -27,7 +28,7 @@ Run the regression checks after building:
 ctest --test-dir build --output-on-failure
 ```
 
-The geometry tests are headless. The GPU test needs an OpenGL display/context (and skips when no display is available). It runs the actual shaders and verifies water conservation, pool merging over a low ridge, level equalization, and continuity of the rendered lake surface.
+The geometry tests are headless. The GPU test needs an OpenGL display/context (and skips when no display is available). It runs the actual shaders and verifies water conservation, pool merging over a low ridge, level equalization, continuity of the rendered lake surface, and downward rain motion at scene times up to six hours.
 
 For a reproducible performance check and screenshot:
 

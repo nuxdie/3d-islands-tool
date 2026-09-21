@@ -84,6 +84,43 @@ void checkMerging(GpuWater& gpu) {
     std::cout << "GPU pools merge across a saddle, equalize their surface, and conserve 16 units of water\n";
 }
 
+void checkRain(GpuWater& gpu) {
+    Shader motion = waterShader(nullptr, R"GLSL(
+        out vec4 finalColor;
+        void main() {
+            float id = floor(gl_FragCoord.y);
+            vec4 cloud = vec4(0, 20.0 + mod(id, 10.0), 0, 3.0);
+            float age;
+            finalColor = rainAt(cloud, id, time + floor(gl_FragCoord.x) / 60.0, age);
+        }
+    )GLSL", waterShaders::rainMotion);
+    int respawns = 0;
+    int changedOrigins = 0;
+    for (float clock : {0.0F, 180.0F, 3600.0F, 21600.0F}) {
+        SetShaderValue(motion, GetShaderLocation(motion, "time"), &clock, SHADER_UNIFORM_FLOAT);
+        simulationPass(gpu.flux, motion, gpu.state[gpu.current].texture, {});
+        auto* samples = static_cast<Vector4*>(rlReadTexturePixels(gpu.flux.texture.id, kGridX, kGridZ, gpu.flux.texture.format));
+        require(samples != nullptr, "Rain motion readback failed");
+        for (int z = 0; z < kGridZ; ++z) for (int x = 1; x < kGridX; ++x) {
+            const Vector4 a = samples[z * kGridX + x - 1];
+            const Vector4 b = samples[z * kGridX + x];
+            require(std::isfinite(b.y), "Nonfinite rain position");
+            if (a.w == b.w) {
+                require(b.y < a.y, "An in-flight raindrop moved upward");
+                require(a.x == b.x && a.z == b.z, "Rain origin moved during its lifetime");
+            } else {
+                ++respawns;
+                changedOrigins += a.x != b.x || a.z != b.z;
+            }
+        }
+        MemFree(samples);
+    }
+    std::cout << "Rain respawns: " << respawns << ", changed origins: " << changedOrigins << '\n';
+    require(respawns > 0 && changedOrigins > respawns * 3 / 4, "Rain repeats the same visible columns on respawn");
+    UnloadShader(motion);
+    std::cout << "GPU rain falls monotonically within each lifetime, including after six hours\n";
+}
+
 int main() {
 #if defined(__linux__)
     if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY")) return 77;
@@ -97,6 +134,7 @@ int main() {
         extractIslands(3786946813U, {}, islands, map);
         GpuWater gpu = createGpuWater(map, 6);
         checkMerging(gpu);
+        checkRain(gpu);
         unloadGpuWater(gpu);
         CloseWindow();
     } catch (const std::exception& error) {

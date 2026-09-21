@@ -186,32 +186,59 @@ void main() {
 }
 )GLSL";
 
+constexpr const char* rainMotion = R"GLSL(
+float rainHash(float n) {
+    uint v = uint(n) + 0x9e3779b9u;
+    v = (v ^ (v >> 16u)) * 0x7feb352du;
+    v = (v ^ (v >> 15u)) * 0x846ca68bu;
+    v ^= v >> 16u;
+    return float(v & 0x00ffffffu) / 16777216.0;
+}
+// Cloud xyz is the stable emission origin, not its animated visual center.
+// Lifetime depends only on that origin and the volume floor. Terrain clips a
+// drop at impact; it must never rescale the age of a drop already in flight.
+vec4 rainAt(vec4 cloud, float id, float clock, out float age) {
+    float top = cloud.y - cloud.w * 0.42;
+    float speed = 10.0 + 6.0 * rainHash(id + 7.0);
+    float lifetime = max(top - volumeMin.y, 1.0) / speed;
+    float cycles = clock / lifetime + rainHash(id + 30.0);
+    float generation = floor(cycles);
+    age = fract(cycles) * lifetime;
+    float seed = id + generation * 67.0;
+    float angle = rainHash(seed + 1.0) * 6.283185;
+    float radius = sqrt(rainHash(seed + 12.0)) * cloud.w;
+    vec2 xz = cloud.xz + vec2(cos(angle) * 1.45, sin(angle)) * radius;
+    return vec4(xz.x, top - speed * age, xz.y, generation);
+}
+)GLSL";
+
 constexpr const char* rainVertex = R"GLSL(
 in vec3 vertexPosition; // cloud index, drop index, vertical tip
 in vec2 vertexTexCoord; // side, unused
 uniform vec4 rainClouds[10]; // xyz, radius
 uniform vec3 cameraRight;
 uniform mat4 mvp;
-float hash(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+uniform sampler2D detailedHeight;
+out float visibility;
 void main() {
     int cloud = int(vertexPosition.x);
     float id = vertexPosition.y + float(cloud) * 193.0;
-    vec4 c = rainClouds[cloud];
-    float angle = hash(id + 1.0) * 6.283185;
-    float radius = sqrt(hash(id + 12.0)) * c.w;
-    vec2 xz = c.xz + vec2(cos(angle) * 1.45, sin(angle)) * radius;
-    float bed = texture(terrain, uvAt(xz)).r;
-    float bottom = max(volumeMin.y, bed);
-    float top = c.y - c.w * 0.42;
-    float speed = 10.0 + 6.0 * hash(id + 7.0);
-    float phase = fract(time * speed / max(top - bottom, 1.0) + hash(id + 30.0));
-    float y = mix(top, bottom, phase);
-    vec3 p = vec3(xz.x, y + vertexPosition.z * 0.5, xz.y) + cameraRight * vertexTexCoord.x * 0.012;
-    gl_Position = mvp * vec4(p, 1);
+    float age;
+    vec3 drop = rainAt(rainClouds[cloud], id, time, age).xyz;
+    vec2 uv = (drop.xz - volumeMin.xz) / (volumeMax.xz - volumeMin.xz);
+    vec2 size = vec2(textureSize(detailedHeight, 0));
+    float bed = texture(detailedHeight, (uv * (size - 1.0) + 0.5) / size).r;
+    float water = texture(state, uvAt(drop.xz)).r;
+    if (water > 0.025) bed = max(bed, texture(terrain, uvAt(drop.xz)).r + water);
+    bed = max(bed, volumeMin.y);
+    visibility = smoothstep(0.0, 0.04, age) * smoothstep(0.0, 0.25, drop.y - bed);
+    vec3 p = drop + vec3(0, vertexPosition.z * 0.5, 0) + cameraRight * vertexTexCoord.x * 0.012;
+    gl_Position = drop.y > bed ? mvp * vec4(p, 1) : vec4(2, 2, 2, 1);
 }
 )GLSL";
 constexpr const char* rainFragment = R"GLSL(
+in float visibility;
 out vec4 finalColor;
-void main() { finalColor = vec4(0.59, 0.8, 0.87, 0.55); }
+void main() { finalColor = vec4(0.59, 0.8, 0.87, 0.55 * visibility); }
 )GLSL";
 } // namespace waterShaders
