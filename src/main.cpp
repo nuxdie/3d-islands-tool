@@ -5,13 +5,14 @@
 #include <cmath>
 #include <cstdint>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 namespace {
 
-constexpr int kGridX = 56;
-constexpr int kGridY = 40;
-constexpr int kGridZ = 56;
+constexpr int kGridX = 88;
+constexpr int kGridY = 60;
+constexpr int kGridZ = 88;
 constexpr Vector3 kVolumeMin{-27.0F, -14.0F, -27.0F};
 constexpr Vector3 kVolumeMax{27.0F, 17.0F, 27.0F};
 constexpr float kSidebarWidth = 400.0F;
@@ -70,6 +71,10 @@ struct HydrologyMap {
     std::vector<float> flow;
     std::vector<float> waterfall;
     std::vector<int> downstream;
+    std::vector<int> outlet;
+    std::vector<SurfaceVertex> surface;
+    std::vector<std::vector<int>> triangles;
+    std::unordered_map<int, std::vector<Vector3>> paths;
 };
 
 enum class SidebarAction {
@@ -309,7 +314,7 @@ float densityAt(const Vector3& point, std::uint32_t seed,
 
     const float rock = fractalNoise3d(point.x * 0.105F + 8.0F,
                                       point.y * 0.12F - 3.0F,
-                                      point.z * 0.105F + 13.0F, seed, 5) - 0.5F;
+                                      point.z * 0.105F + 13.0F, seed, 4) - 0.5F;
     const float caveScale = 0.135F;
     const float caveDistance = cellularDistance3d(point.x * caveScale - 21.0F,
                                                    point.y * caveScale + 7.0F,
@@ -319,19 +324,28 @@ float densityAt(const Vector3& point, std::uint32_t seed,
     const float caveRadius = settings.caveSize + caveRoughness * 0.16F;
     const float caveCut = (1.0F - smoothstep(caveRadius, caveRadius + 0.13F, caveDistance)) *
                           settings.caveStrength;
-    return island + rock * settings.roughness - caveCut;
+    // Fade to air before the sampling boundary so even large islands close.
+    const float boundary = std::min({point.x - kVolumeMin.x, kVolumeMax.x - point.x,
+                                     point.y - kVolumeMin.y, kVolumeMax.y - point.y,
+                                     point.z - kVolumeMin.z, kVolumeMax.z - point.z});
+    const float field = island + rock * settings.roughness - caveCut;
+    const float limit = (boundary - 0.8F) * 0.7F;
+    const float blend = std::max(0.6F - std::abs(field - limit), 0.0F) / 0.6F;
+    return std::min(field, limit) - blend * blend * 0.15F;
 }
 
 Color surfaceColor(const SurfaceVertex& vertex) {
-    Color base{};
+    const auto blend = [](Color a, Color b, float t) {
+        return Color{static_cast<unsigned char>(mix(a.r, b.r, t)),
+                     static_cast<unsigned char>(mix(a.g, b.g, t)),
+                     static_cast<unsigned char>(mix(a.b, b.b, t)), 255};
+    };
     const float upward = vertex.normal.y;
-    if (upward > 0.52F && vertex.position.y > -1.5F) {
-        base = vertex.position.y > 7.0F ? Color{168, 178, 151, 255} : Color{63, 121, 73, 255};
-    } else if (upward < -0.45F) {
-        base = Color{76, 60, 55, 255};
-    } else {
-        base = Color{119, 101, 82, 255};
-    }
+    Color base = blend(Color{76, 60, 55, 255}, Color{119, 101, 82, 255},
+                       smoothstep(-0.65F, -0.25F, upward));
+    const Color grass = blend(Color{63, 121, 73, 255}, Color{168, 178, 151, 255},
+                              smoothstep(6.0F, 8.0F, vertex.position.y));
+    base = blend(base, grass, smoothstep(0.35F, 0.7F, upward) * smoothstep(-2.0F, -1.0F, vertex.position.y));
 
     const Vector3 light = normalize(Vector3{-0.55F, 0.78F, -0.3F});
     const float diffuse = std::clamp(dot(vertex.normal, light), 0.0F, 1.0F);
@@ -345,6 +359,12 @@ Color surfaceColor(const SurfaceVertex& vertex) {
 }
 
 SurfaceVertex interpolateSurface(const Sample& a, const Sample& b) {
+    // Use the same arithmetic order on every shared edge.
+    if (a.position.x > b.position.x ||
+        (a.position.x == b.position.x && a.position.y > b.position.y) ||
+        (a.position.x == b.position.x && a.position.y == b.position.y && a.position.z > b.position.z)) {
+        return interpolateSurface(b, a);
+    }
     const float amount = std::clamp(a.density / (a.density - b.density), 0.0F, 1.0F);
     return SurfaceVertex{
         mix(a.position, b.position, amount),
@@ -353,14 +373,10 @@ SurfaceVertex interpolateSurface(const Sample& a, const Sample& b) {
 }
 
 void addTriangle(std::vector<SurfaceVertex>& vertices,
-                 SurfaceVertex a, SurfaceVertex b, SurfaceVertex c) {
+                 SurfaceVertex a, SurfaceVertex b, SurfaceVertex c, const Vector3& outward) {
     const Vector3 faceNormal = cross(subtract(b.position, a.position), subtract(c.position, a.position));
-    const Vector3 averageNormal = Vector3{
-        a.normal.x + b.normal.x + c.normal.x,
-        a.normal.y + b.normal.y + c.normal.y,
-        a.normal.z + b.normal.z + c.normal.z
-    };
-    if (dot(faceNormal, averageNormal) < 0.0F) {
+    // Topology, not smoothed shading normals, determines the visible side.
+    if (dot(faceNormal, outward) < 0.0F) {
         std::swap(b, c);
     }
     vertices.push_back(a);
@@ -385,6 +401,7 @@ void polygonizeTetrahedron(const std::array<const Sample*, 4>& tetra,
     if (insideCount == 0 || insideCount == 4) {
         return;
     }
+    const Vector3 outward = subtract(tetra[outside[0]]->position, tetra[inside[0]]->position);
     if (insideCount == 1 || insideCount == 3) {
         const bool singleInside = insideCount == 1;
         const int anchor = singleInside ? inside[0] : outside[0];
@@ -392,7 +409,7 @@ void polygonizeTetrahedron(const std::array<const Sample*, 4>& tetra,
         addTriangle(vertices,
                     interpolateSurface(*tetra[static_cast<std::size_t>(anchor)], *tetra[static_cast<std::size_t>(others[0])]),
                     interpolateSurface(*tetra[static_cast<std::size_t>(anchor)], *tetra[static_cast<std::size_t>(others[1])]),
-                    interpolateSurface(*tetra[static_cast<std::size_t>(anchor)], *tetra[static_cast<std::size_t>(others[2])]));
+                    interpolateSurface(*tetra[static_cast<std::size_t>(anchor)], *tetra[static_cast<std::size_t>(others[2])]), outward);
         return;
     }
 
@@ -404,13 +421,12 @@ void polygonizeTetrahedron(const std::array<const Sample*, 4>& tetra,
     const SurfaceVertex ad = interpolateSurface(a, d);
     const SurfaceVertex bc = interpolateSurface(b, c);
     const SurfaceVertex bd = interpolateSurface(b, d);
-    addTriangle(vertices, ac, ad, bd);
-    addTriangle(vertices, ac, bd, bc);
+    addTriangle(vertices, ac, ad, bd, outward);
+    addTriangle(vertices, ac, bd, bc, outward);
 }
 
-Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
-                    int& triangleCount, int& islandCount, HydrologyMap& hydrology,
-                    std::vector<unsigned char>& baseColors) {
+std::vector<SurfaceVertex> extractIslands(std::uint32_t seed, const GenerationSettings& settings,
+                                         int& islandCount, HydrologyMap& hydrology) {
     const auto sampleIndex = [](int x, int y, int z) {
         return static_cast<std::size_t>((z * kGridY + y) * kGridX + x);
     };
@@ -444,6 +460,8 @@ Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
     hydrology.flow.assign(surfaceCellCount, 0.0F);
     hydrology.waterfall.assign(surfaceCellCount, 0.0F);
     hydrology.downstream.assign(surfaceCellCount, -1);
+    hydrology.outlet.assign(surfaceCellCount, -1);
+    hydrology.paths.clear();
     for (int z = 0; z < kGridZ; ++z) {
         for (int x = 0; x < kGridX; ++x) {
             const std::size_t cell = static_cast<std::size_t>(z * kGridX + x);
@@ -471,7 +489,10 @@ Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
                 const float dx = samples[sampleIndex(right, y, z)].density - samples[sampleIndex(left, y, z)].density;
                 const float dy = samples[sampleIndex(x, up, z)].density - samples[sampleIndex(x, down, z)].density;
                 const float dz = samples[sampleIndex(x, y, front)].density - samples[sampleIndex(x, y, back)].density;
-                samples[sampleIndex(x, y, z)].normal = normalize(Vector3{-dx, -dy, -dz});
+                samples[sampleIndex(x, y, z)].normal = normalize(Vector3{
+                    -dx / (static_cast<float>(right - left) * step.x),
+                    -dy / (static_cast<float>(up - down) * step.y),
+                    -dz / (static_cast<float>(front - back) * step.z)});
             }
         }
     }
@@ -505,6 +526,29 @@ Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
         }
     }
 
+    hydrology.surface = surface;
+    hydrology.triangles.assign(surfaceCellCount, {});
+    for (std::size_t i = 0; i < surface.size(); i += 3) {
+        const Vector3 a = surface[i].position;
+        const Vector3 b = surface[i + 1].position;
+        const Vector3 c = surface[i + 2].position;
+        const int minX = std::clamp(static_cast<int>((std::min({a.x, b.x, c.x}) - kVolumeMin.x) / step.x), 0, kGridX - 2);
+        const int maxX = std::clamp(static_cast<int>((std::max({a.x, b.x, c.x}) - kVolumeMin.x) / step.x), 0, kGridX - 2);
+        const int minZ = std::clamp(static_cast<int>((std::min({a.z, b.z, c.z}) - kVolumeMin.z) / step.z), 0, kGridZ - 2);
+        const int maxZ = std::clamp(static_cast<int>((std::max({a.z, b.z, c.z}) - kVolumeMin.z) / step.z), 0, kGridZ - 2);
+        for (int z = minZ; z <= maxZ; ++z) {
+            for (int x = minX; x <= maxX; ++x) {
+                hydrology.triangles[z * kGridX + x].push_back(static_cast<int>(i));
+            }
+        }
+    }
+    return surface;
+}
+
+Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
+                    int& triangleCount, int& islandCount, HydrologyMap& hydrology,
+                    std::vector<unsigned char>& baseColors) {
+    const auto surface = extractIslands(seed, settings, islandCount, hydrology);
     Mesh mesh{};
     mesh.vertexCount = static_cast<int>(surface.size());
     mesh.triangleCount = mesh.vertexCount / 3;
@@ -686,6 +730,91 @@ Vector3 surfaceCellPosition(const HydrologyMap& hydrology, int cell) {
     };
 }
 
+RayCollision terrainHit(const HydrologyMap& hydrology, const Vector3& start, const Vector3& end) {
+    const Vector3 delta = subtract(end, start);
+    const float length = std::sqrt(dot(delta, delta));
+    RayCollision closest{};
+    closest.distance = length + 0.0001F;
+    if (length < 0.00001F) return closest;
+    const float dx = (kVolumeMax.x - kVolumeMin.x) / static_cast<float>(kGridX - 1);
+    const float dz = (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1);
+    if (std::max(start.x, end.x) < kVolumeMin.x || std::min(start.x, end.x) > kVolumeMax.x ||
+        std::max(start.z, end.z) < kVolumeMin.z || std::min(start.z, end.z) > kVolumeMax.z) return closest;
+    const int minX = std::clamp(static_cast<int>(std::floor((std::min(start.x, end.x) - kVolumeMin.x) / dx)), 0, kGridX - 2);
+    const int maxX = std::clamp(static_cast<int>(std::floor((std::max(start.x, end.x) - kVolumeMin.x) / dx)), 0, kGridX - 2);
+    const int minZ = std::clamp(static_cast<int>(std::floor((std::min(start.z, end.z) - kVolumeMin.z) / dz)), 0, kGridZ - 2);
+    const int maxZ = std::clamp(static_cast<int>(std::floor((std::max(start.z, end.z) - kVolumeMin.z) / dz)), 0, kGridZ - 2);
+    const Ray ray{start, normalize(delta)};
+    for (int z = minZ; z <= maxZ; ++z) {
+        for (int x = minX; x <= maxX; ++x) {
+            for (int triangle : hydrology.triangles[z * kGridX + x]) {
+                const RayCollision hit = GetRayCollisionTriangle(ray,
+                    hydrology.surface[triangle].position,
+                    hydrology.surface[triangle + 1].position,
+                    hydrology.surface[triangle + 2].position);
+                if (hit.hit && hit.distance < closest.distance) closest = hit;
+            }
+        }
+    }
+    return closest;
+}
+
+bool terrainHeight(const HydrologyMap& hydrology, float x, float z, float ceiling, float& height) {
+    const RayCollision hit = terrainHit(hydrology, Vector3{x, ceiling, z}, Vector3{x, kVolumeMin.y - 1.0F, z});
+    if (!hit.hit) return false;
+    height = hit.point.y;
+    return true;
+}
+
+// Cache finely sampled terrain paths, including ballistic motion after a lip.
+const std::vector<Vector3>& waterPath(HydrologyMap& hydrology, int cell, int destination) {
+    const int key = cell * (kGridX * kGridZ) + destination;
+    auto [entry, inserted] = hydrology.paths.try_emplace(key);
+    if (!inserted) return entry->second;
+    auto& path = entry->second;
+    Vector3 position = surfaceCellPosition(hydrology, cell);
+    const Vector3 target = surfaceCellPosition(hydrology, destination);
+    const Vector3 direction = normalize(Vector3{target.x - position.x, 0.0F, target.z - position.z});
+    const bool edge = hydrology.height[destination] <= kVolumeMin.y;
+    position.y += 0.045F;
+    path.push_back(position);
+    Vector3 velocity{direction.x * 1.8F, 0.0F, direction.z * 1.8F};
+    bool airborne = false;
+    constexpr float dt = 0.035F;
+    for (int step = 0; step < 400; ++step) {
+        Vector3 next{position.x + velocity.x * dt, position.y, position.z + velocity.z * dt};
+        if (!airborne) {
+            const float remaining = dot(subtract(target, position), direction);
+            if (!edge && remaining <= 0.065F && std::abs(position.y - target.y) < 0.38F) {
+                Vector3 end = target;
+                end.y += 0.045F;
+                path.push_back(end);
+                break;
+            }
+            float height = 0.0F;
+            if (terrainHeight(hydrology, next.x, next.z, position.y + 0.25F, height) &&
+                position.y - height < 0.38F) {
+                next.y = height + 0.045F;
+            } else {
+                airborne = true;
+            }
+        }
+        if (airborne) {
+            velocity.y -= 9.81F * dt;
+            next.y = position.y + velocity.y * dt;
+            const RayCollision hit = terrainHit(hydrology, position, next);
+            if (hit.hit) {
+                path.push_back(Vector3{hit.point.x, hit.point.y + 0.045F, hit.point.z});
+                break;
+            }
+        }
+        path.push_back(next);
+        position = next;
+        if (position.y < kVolumeMin.y) break;
+    }
+    return path;
+}
+
 void updateWeather(std::vector<Cloud>& clouds, std::vector<RainDrop>& drops,
                    std::mt19937& engine, HydrologyMap& hydrology, float deltaTime) {
     std::uniform_real_distribution<float> unit(-1.0F, 1.0F);
@@ -722,8 +851,9 @@ void updateWeather(std::vector<Cloud>& clouds, std::vector<RainDrop>& drops,
         drop.position.y -= drop.speed * deltaTime;
         const int cell = surfaceCellAt(hydrology, drop.position.x, drop.position.z);
         if (cell >= 0) {
-            const float surface = hydrology.height[static_cast<std::size_t>(cell)];
-            if (previousY >= surface && drop.position.y <= surface + 0.12F) {
+            float surface = 0.0F;
+            if (terrainHeight(hydrology, drop.position.x, drop.position.z, previousY + 0.12F, surface) &&
+                previousY >= surface && drop.position.y <= surface + 0.12F) {
                 hydrology.water[static_cast<std::size_t>(cell)] =
                     std::min(4.0F, hydrology.water[static_cast<std::size_t>(cell)] + 0.045F);
                 hydrology.wetness[static_cast<std::size_t>(cell)] =
@@ -765,38 +895,60 @@ void updateHydrology(HydrologyMap& hydrology, float deltaTime) {
             const float currentWaterLevel = hydrology.height[index] +
                                             hydrology.water[index] * kWaterLevelScale;
             float lowestWaterLevel = currentWaterLevel - 0.025F;
-            bool bordersAir = false;
+            float steepestSlope = 0.0F;
+            int airNeighbor = -1;
             for (const auto& offset : kNeighbors) {
                 const int neighborX = x + offset[0];
                 const int neighborZ = z + offset[1];
                 if (neighborX < 0 || neighborX >= kGridX || neighborZ < 0 || neighborZ >= kGridZ) {
-                    bordersAir = true;
                     continue;
                 }
                 const int neighbor = neighborZ * kGridX + neighborX;
                 const std::size_t neighborIndex = static_cast<std::size_t>(neighbor);
                 const float neighborHeight = hydrology.height[neighborIndex];
                 if (neighborHeight <= kVolumeMin.y) {
-                    bordersAir = true;
+                    if (airNeighbor < 0 || offset[0] == 0 || offset[1] == 0) airNeighbor = neighbor;
                 } else {
                     const float neighborWaterLevel = neighborHeight +
                                                      hydrology.water[neighborIndex] * kWaterLevelScale;
-                    if (neighborWaterLevel < lowestWaterLevel) {
+                    const float distance = std::sqrt(static_cast<float>(offset[0] * offset[0] + offset[1] * offset[1]));
+                    const float slope = (currentWaterLevel - neighborWaterLevel) / distance;
+                    if (neighborWaterLevel < currentWaterLevel - 0.025F && slope > steepestSlope) {
                         lowestWaterLevel = neighborWaterLevel;
+                        steepestSlope = slope;
                         lowestNeighbor = neighbor;
                     }
                 }
             }
 
-            const float transfer = hydrology.water[index] * std::min(0.72F, deltaTime * 3.5F);
+            const float available = lowestNeighbor >= 0
+                ? std::min(hydrology.water[index], (currentWaterLevel - lowestWaterLevel) / (2.0F * kWaterLevelScale))
+                : hydrology.water[index];
+            const float transfer = available * std::min(0.72F, deltaTime * 3.5F);
             if (lowestNeighbor >= 0 && transfer > 0.00001F) {
+                const auto& path = waterPath(hydrology, cell, lowestNeighbor);
+                const Vector3 landing = path.back();
+                const int receiver = surfaceCellAt(hydrology, landing.x, landing.z);
+                // A cliff path may land farther away than the adjacent grid node.
+                // Keep water at blocked outlets, and deliver falls where they hit.
+                if (receiver == cell) continue;
                 hydrology.water[index] -= transfer;
-                incoming[static_cast<std::size_t>(lowestNeighbor)] += transfer;
+                if (receiver >= 0 && landing.y > kVolumeMin.y) {
+                    incoming[static_cast<std::size_t>(receiver)] += transfer;
+                }
                 hydrology.downstream[index] = lowestNeighbor;
                 hydrology.flow[index] = std::max(hydrology.flow[index], transfer / std::max(deltaTime, 0.001F));
-            } else if (bordersAir && transfer > 0.00001F) {
+            } else if (airNeighbor >= 0 && transfer > 0.00001F) {
+                const auto& path = waterPath(hydrology, cell, airNeighbor);
+                const Vector3 landing = path.back();
+                const int receiver = surfaceCellAt(hydrology, landing.x, landing.z);
+                if (receiver == cell) continue;
                 hydrology.water[index] -= transfer;
+                if (receiver >= 0 && landing.y > kVolumeMin.y) {
+                    incoming[static_cast<std::size_t>(receiver)] += transfer;
+                }
                 hydrology.downstream[index] = -2;
+                hydrology.outlet[index] = airNeighbor;
                 hydrology.waterfall[index] = std::max(
                     hydrology.waterfall[index], transfer / std::max(deltaTime, 0.001F));
             }
@@ -835,7 +987,46 @@ void applyWetness(Model& model, const HydrologyMap& hydrology,
     UpdateMeshBuffer(mesh, 3, mesh.colors, mesh.vertexCount * 4 * static_cast<int>(sizeof(unsigned char)), 0);
 }
 
-void drawHydrology(const HydrologyMap& hydrology) {
+void drawWaterRibbon(const HydrologyMap& hydrology, const std::vector<Vector3>& path,
+                     float width, Color color) {
+    if (path.size() < 2) return;
+    Vector3 previousLeft{};
+    Vector3 previousRight{};
+    Vector3 side{1.0F, 0.0F, 0.0F};
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        const Vector3 tangent = subtract(path[std::min(i + 1, path.size() - 1)], path[i == 0 ? 0 : i - 1]);
+        if (tangent.x * tangent.x + tangent.z * tangent.z > 0.000001F) {
+            side = normalize(Vector3{-tangent.z, 0.0F, tangent.x});
+        }
+        Vector3 left{path[i].x + side.x * width, path[i].y, path[i].z + side.z * width};
+        Vector3 right{path[i].x - side.x * width, path[i].y, path[i].z - side.z * width};
+        float centerHeight = 0.0F;
+        const bool attached = terrainHeight(hydrology, path[i].x, path[i].z, path[i].y + 0.1F, centerHeight) &&
+                              std::abs(path[i].y - centerHeight) < 0.15F;
+        if (attached) {
+            for (Vector3* bank : {&left, &right}) {
+                float height = 0.0F;
+                if (terrainHeight(hydrology, bank->x, bank->z, path[i].y + 0.4F, height) &&
+                    std::abs(height - centerHeight) < 0.5F) {
+                    bank->y = height + 0.045F;
+                } else {
+                    *bank = path[i];
+                }
+            }
+        }
+        if (i > 0) {
+            DrawTriangle3D(previousLeft, left, right, color);
+            DrawTriangle3D(previousLeft, right, previousRight, color);
+            // A thin water sheet is visible from either side of an overhang.
+            DrawTriangle3D(right, left, previousLeft, color);
+            DrawTriangle3D(previousRight, right, previousLeft, color);
+        }
+        previousLeft = left;
+        previousRight = right;
+    }
+}
+
+void drawHydrology(HydrologyMap& hydrology) {
     const float cellWidth = (kVolumeMax.x - kVolumeMin.x) / static_cast<float>(kGridX - 1);
     const float cellDepth = (kVolumeMax.z - kVolumeMin.z) / static_cast<float>(kGridZ - 1);
     const float poolRadius = std::min(cellWidth, cellDepth) * 0.62F;
@@ -855,21 +1046,15 @@ void drawHydrology(const HydrologyMap& hydrology) {
 
     for (std::size_t index = 0; index < hydrology.flow.size(); ++index) {
         if (hydrology.downstream[index] >= 0 && hydrology.flow[index] > 0.008F) {
-            Vector3 start = surfaceCellPosition(hydrology, static_cast<int>(index));
-            Vector3 end = surfaceCellPosition(hydrology, hydrology.downstream[index]);
-            start.y += 0.09F;
-            end.y += 0.09F;
             const float strength = std::clamp(std::sqrt(hydrology.flow[index]) * 0.12F, 0.025F, 0.2F);
-            DrawCylinderEx(start, end, strength, strength * 0.8F, 6, Color{54, 139, 178, 220});
-        } else if (hydrology.downstream[index] == -2 && hydrology.waterfall[index] > 0.012F) {
-            Vector3 start = surfaceCellPosition(hydrology, static_cast<int>(index));
-            start.y += 0.05F;
-            const Vector3 end{start.x, kVolumeMin.y, start.z};
+            drawWaterRibbon(hydrology, waterPath(hydrology, static_cast<int>(index), hydrology.downstream[index]),
+                            strength, Color{54, 139, 178, 220});
+        } else if (hydrology.downstream[index] == -2 && hydrology.outlet[index] >= 0 &&
+                   hydrology.waterfall[index] > 0.012F) {
             const float strength = std::clamp(std::sqrt(hydrology.waterfall[index]) * 0.14F,
                                               0.035F, 0.24F);
-            DrawCylinderEx(start, end, strength, strength * 0.72F, 7, Color{104, 181, 211, 205});
-            DrawLine3D(Vector3{start.x + strength, start.y, start.z},
-                       Vector3{end.x + strength, end.y, end.z}, Color{196, 229, 235, 190});
+            drawWaterRibbon(hydrology, waterPath(hydrology, static_cast<int>(index), hydrology.outlet[index]),
+                            strength, Color{104, 181, 211, 205});
         }
     }
 }
