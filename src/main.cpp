@@ -1,7 +1,7 @@
 #include "raylib.h"
 #include "rlgl.h"
-#include "water_shaders.h"
-#include "particle_fluid.h"
+#include "raymath.h"
+#include "shallow_shaders.h"
 
 #include <algorithm>
 #include <array>
@@ -259,7 +259,7 @@ std::vector<IslandShape> createIslandConfiguration(std::uint32_t seed,
     return islands;
 }
 
-std::vector<Cloud> createClouds(std::uint32_t seed, const GenerationSettings& settings) {
+[[maybe_unused]] std::vector<Cloud> createClouds(std::uint32_t seed, const GenerationSettings& settings) {
     const std::vector<IslandShape> islands = createIslandConfiguration(seed, settings);
     std::mt19937 engine(seed ^ 0xa341316cU);
     std::uniform_real_distribution<float> offset(-1.8F, 1.8F);
@@ -528,7 +528,7 @@ std::vector<SurfaceVertex> extractIslands(std::uint32_t seed, const GenerationSe
     return surface;
 }
 
-Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
+[[maybe_unused]] Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
                     int& triangleCount, int& islandCount, HydrologyMap& hydrology) {
     const auto surface = extractIslands(seed, settings, islandCount, hydrology);
     Mesh mesh{};
@@ -561,11 +561,11 @@ Model createIslands(std::uint32_t seed, const GenerationSettings& settings,
 void drawInterface(std::uint32_t seed, int islandCount, int triangleCount) {
     DrawRectangleRounded(Rectangle{20.0F, 20.0F, 338.0F, 118.0F}, 0.12F, 8,
                          Fade(Color{8, 14, 24, 255}, 0.84F));
-    DrawText("VOLUMETRIC NOISE ISLANDS", 36, 34, 20, Color{231, 222, 191, 255});
+    DrawText("LANDSCAPE WATER", 36, 34, 20, Color{231, 222, 191, 255});
     DrawText(TextFormat("SEED  %u", seed), 36, 62, 16, Color{127, 195, 183, 255});
-    DrawText(TextFormat("%d ISLANDS  |  %d TRIANGLES  |  3D CAVES", islandCount, triangleCount),
+    DrawText(TextFormat("%d ISLANDS | %d TRIANGLES | METRES", islandCount, triangleCount),
              36, 85, 12, Color{153, 170, 174, 255});
-    DrawText("DRAG orbit   WHEEL zoom   SPACE new seed", 36, 108, 12, Color{190, 204, 201, 255});
+    DrawText("DRAG orbit | RIGHT DRAG pan | WHEEL zoom", 36, 108, 12, Color{190, 204, 201, 255});
 }
 
 bool drawSlider(const char* label, const char* description, float& value,
@@ -653,7 +653,7 @@ SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
                                   settings.caveStrength, 0.25F, 1.9F, 0.03F,
                                   controlX, 396.0F, "%.2f");
 
-    DrawText("DRAG OR SCROLL - MESH UPDATES LIVE", static_cast<int>(controlX), 461, 11,
+    DrawText("RELEASE TO APPLY - SCROLL TO FINE TUNE", static_cast<int>(controlX), 461, 11,
              Color{91, 151, 139, 255});
 
     SidebarAction action = settingsChanged ? SidebarAction::rebuild : SidebarAction::none;
@@ -671,7 +671,7 @@ SidebarAction drawSidebar(GenerationSettings& settings, std::uint32_t seed,
     return action;
 }
 
-void drawStars() {
+[[maybe_unused]] void drawStars() {
     std::uint32_t state = 0x12345678U;
     for (int index = 0; index < 90; ++index) {
         state = state * 1664525U + 1013904223U;
@@ -687,7 +687,7 @@ float cloudHeight(const Cloud& cloud) {
     return cloud.position.y + std::sin(cloud.phase) * 0.22F;
 }
 
-Vector3 surfaceCellPosition(const HydrologyMap& hydrology, int cell) {
+[[maybe_unused]] Vector3 surfaceCellPosition(const HydrologyMap& hydrology, int cell) {
     const int x = cell % kGridX;
     const int z = cell / kGridX;
     return Vector3{
@@ -733,9 +733,10 @@ bool terrainHeight(const HydrologyMap& hydrology, float x, float z, float ceilin
     return true;
 }
 
+#include "landscape.h"
 #include "gpu_water.h"
 
-void drawClouds(const std::vector<Cloud>& clouds, const Model& sphere) {
+[[maybe_unused]] void drawClouds(const std::vector<Cloud>& clouds, const Model& sphere) {
     constexpr std::array<Vector3, 8> kPuffOffsets{{
         {-0.95F, -0.08F, 0.0F}, {-0.45F, 0.22F, -0.12F}, {0.0F, 0.02F, 0.12F},
         {0.48F, 0.25F, -0.08F}, {0.98F, -0.05F, 0.08F}, {-0.35F, -0.2F, 0.24F},
@@ -770,7 +771,7 @@ int main(int argc, char** argv) try {
     std::uint32_t requestedSeed = 0;
     bool fixedSeed = false;
     float initialYaw = 0.72F;
-    float initialPitch = 0.32F;
+    float initialPitch = 0.62F;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--benchmark" && i + 1 < argc) benchmarkFrames = std::max(1, std::atoi(argv[++i]));
@@ -787,6 +788,7 @@ int main(int argc, char** argv) try {
     if (hidden) flags |= FLAG_WINDOW_HIDDEN;
     SetConfigFlags(flags);
     InitWindow(1280, 760, "Volumetric Noise Islands");
+    rlSetClipPlanes(0.5,60000.0);
     SetWindowMinSize(1000, 650);
     SetTargetFPS(benchmarkFrames > 0 ? 0 : 60);
 
@@ -796,13 +798,12 @@ int main(int argc, char** argv) try {
     GenerationSettings settings;
     int triangleCount = 0;
     int islandCount = 0;
-    HydrologyMap hydrology;
-    Model islands = createIslands(seed, settings, triangleCount, islandCount, hydrology);
-    std::vector<Cloud> clouds = createClouds(seed, settings);
-    GpuWater gpu = createGpuWater(hydrology, clouds);
+    LandscapeData landscape;
+    Model islands = createLandscape(seed, settings, triangleCount, islandCount, landscape);
+    GpuWater gpu = createGpuWater(landscape);
     islands.materials[0].shader = gpu.terrainShader;
     for (int step = 0; step < static_cast<int>(warmupSeconds / kWaterStep); ++step) {
-        stepGpuWater(gpu, clouds);
+        stepGpuWater(gpu);
         gpu.time += kWaterStep;
     }
     TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
@@ -810,13 +811,13 @@ int main(int argc, char** argv) try {
 
     float yaw = initialYaw;
     float pitch = initialPitch;
-    float distance = 52.0F;
+    float distance = 14000.0F;
     bool wireframe = false;
     bool autoRotate = benchmarkFrames == 0;
     bool rebuildRequested = false;
 
     Camera3D camera{};
-    camera.target = Vector3{0.0F, 1.5F, 0.0F};
+    camera.target = Vector3{0.0F, 900.0F, 0.0F};
     camera.up = Vector3{0.0F, 1.0F, 0.0F};
     camera.fovy = 45.0F;
     camera.projection = CAMERA_PERSPECTIVE;
@@ -851,16 +852,21 @@ int main(int argc, char** argv) try {
             yaw += deltaTime * 0.08F;
         }
         if (!mouseOverSidebar) {
-            distance = std::clamp(distance - GetMouseWheelMove() * 2.5F, 24.0F, 82.0F);
+            distance = std::clamp(distance*std::pow(0.87F,GetMouseWheelMove()),450.0F,35000.0F);
+            if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+                const Vector2 pan=GetMouseDelta();
+                camera.target.x+=(-std::sin(yaw)*pan.x+std::cos(yaw)*pan.y)*distance*0.0015F;
+                camera.target.z+=(std::cos(yaw)*pan.x+std::sin(yaw)*pan.y)*distance*0.0015F;
+                autoRotate=false;
+            }
         }
 
         camera.position = Vector3{
-            std::cos(yaw) * std::cos(pitch) * distance,
-            std::sin(pitch) * distance + 1.5F,
-            std::sin(yaw) * std::cos(pitch) * distance
+            camera.target.x+std::cos(yaw) * std::cos(pitch) * distance,
+            std::sin(pitch) * distance + camera.target.y,
+            camera.target.z+std::sin(yaw) * std::cos(pitch) * distance
         };
-        for (Cloud& cloud : clouds) cloud.phase += deltaTime * 0.55F;
-        updateGpuWater(gpu, clouds, deltaTime);
+        updateGpuWater(gpu, deltaTime);
         if (benchmarkTarget.texture.width != GetScreenWidth() || benchmarkTarget.texture.height != GetScreenHeight()) {
             UnloadRenderTexture(benchmarkTarget);
             benchmarkTarget = LoadRenderTexture(GetScreenWidth(),GetScreenHeight());
@@ -868,23 +874,23 @@ int main(int argc, char** argv) try {
 
         BeginDrawing();
         BeginTextureMode(benchmarkTarget);
-        ClearBackground(Color{5, 10, 19, 255});
+        ClearBackground(Color{174,200,216,255});
         DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(),
-                               Color{18, 33, 48, 255}, Color{3, 7, 15, 255});
-        drawStars();
+                               Color{127,170,204,255},Color{212,223,225,255});
 
         BeginMode3D(camera);
-        bindWaterTextures(islands, gpu);
-        if (wireframe) {
-            DrawModelWires(islands, Vector3{0.0F, 0.0F, 0.0F}, 1.0F, Color{174, 224, 206, 255});
-        } else {
-            DrawModel(islands, Vector3{0.0F, 0.0F, 0.0F}, 1.0F, WHITE);
-        }
-        drawGpuWater(gpu, clouds, camera);
-        drawClouds(clouds, gpu.cloudSphere);
+        const int viewWidth=std::max(1,GetScreenWidth()-static_cast<int>(kSidebarWidth));
+        rlViewport(0,0,viewWidth,GetScreenHeight());
+        rlSetMatrixProjection(MatrixPerspective(camera.fovy*DEG2RAD,static_cast<double>(viewWidth)/GetScreenHeight(),0.5,60000.0));
+        bindWaterTextures(islands, gpu,camera);
+        drawLandscape(islands,landscape,camera,wireframe,triangleCount);
+        drawGpuWater(gpu,camera);
         EndMode3D();
+        rlViewport(0,0,GetScreenWidth(),GetScreenHeight());
 
         drawInterface(seed, islandCount, triangleCount);
+        DrawText(TextFormat("MAIN ISLAND %.1f km | CAMERA RANGE %.1f km",landscape.layers[0].width*0.92F/1000.0F,distance/1000.0F),
+                 24,GetScreenHeight()-30,14,Color{35,61,74,255});
         const SidebarAction sidebarAction = drawSidebar(settings, seed, wireframe, autoRotate);
         if (sidebarAction == SidebarAction::rebuild) {
             rebuildRequested = true;
@@ -919,12 +925,11 @@ int main(int argc, char** argv) try {
             break;
         }
 
-        if (rebuildRequested) {
+        if (rebuildRequested && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             UnloadModel(islands);
             unloadGpuWater(gpu);
-            islands = createIslands(seed, settings, triangleCount, islandCount, hydrology);
-            clouds = createClouds(seed, settings);
-            gpu = createGpuWater(hydrology, clouds);
+            islands = createLandscape(seed, settings, triangleCount, islandCount, landscape);
+            gpu = createGpuWater(landscape);
             islands.materials[0].shader = gpu.terrainShader;
             TraceLog(LOG_INFO, "VOLUME: Generated %d islands and %d triangles from seed %u",
                      islandCount, triangleCount, seed);
