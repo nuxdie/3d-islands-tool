@@ -1,6 +1,6 @@
-# Fractal Noise Islands
+# Volumetric Noise Islands
 
-An interactive C++ visualization that turns seeded fractal value noise into a 3D island. It includes domain-warped terrain, height-based coloring, water, an orbit camera, and wireframe mode.
+An interactive C++ visualization that turns a seeded 3D density field into floating, cave-filled islands. Unlike a heightmap, the volume supports overhangs, undersides, tunnels, and enclosed voids. A marching-tetrahedra pass extracts the visible isosurface from fractal rock and cave noise.
 
 ## Build
 
