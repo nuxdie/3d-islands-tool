@@ -73,3 +73,9 @@ GPU tests require a display/OpenGL context and skip if no display is available.
 ```
 
 Benchmark mode renders the full scene to a 1280 × 760 offscreen target without VSync or the normal 60 FPS cap. It excludes terrain preparation and 30 warm-up frames, and waits for GPU completion before reporting time. It advances 1/60 second of water simulation per rendered frame. The target is not multisampled. Optional `--yaw` and `--pitch` arguments set the camera angles in radians. Shaders are embedded in the executable, so its working directory does not affect shader loading.
+
+## Status: closed (2026-10)
+Part of **OpenSkyRPG**: my attempt (Aug–Sep 2026) at a deep 3D RPG of my own, after Morrowind felt antiquated and
+Skyrim felt wide as an ocean and deep as a puddle. This tool made the floating islands and their water.
+The project's answer: a Skyrim-scale RPG isn't buildable by one person + AI. Closed; not maintained. The world
+generation, GPU water and voxel viewing parts are reusable.
